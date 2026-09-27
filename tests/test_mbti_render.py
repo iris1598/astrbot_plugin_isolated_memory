@@ -166,18 +166,24 @@ class TestCommandDeliveryBranches(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         from unittest.mock import AsyncMock, MagicMock
-        from main import Main
+        import test_gate
+        Main = test_gate.Main
 
         self.Main = Main
         self.plug = MagicMock()
-        self.plug.config = {"memory_mbti_render_mode": "image", "memory_mbti_enabled": True}
+        self.plug.config = {"memory_mbti_render_mode": "text", "memory_mbti_enabled": True}
         self.plug._mcfg = lambda k, d=None: self.plug.config.get(k, d)
         self.plug._gate_block_reason = lambda ev: None
         self.plug._ensure_memory = AsyncMock(return_value=self.plug)
+        self.plug.memory = self.plug
 
         self.plug.collect_memory_entries = AsyncMock(
             return_value=[{"text": f"m{i}"} for i in range(10)]
         )
+        self.plug.build_character_match = AsyncMock(
+            return_value={"top_character": {"name": "爱弥斯"}}
+        )
+        self.plug.format_character_report = MagicMock(return_value="[TEXT REPORT]")
         self.plug.build_mbti_anchor_report = AsyncMock(
             return_value={
                 "type": "INTJ",
@@ -189,41 +195,25 @@ class TestCommandDeliveryBranches(unittest.IsolatedAsyncioTestCase):
         )
         self.plug.format_mbti_report = MagicMock(return_value="[TEXT REPORT]")
 
-    async def test_image_delivery_success(self):
+    async def test_text_delivery_success(self):
         from unittest.mock import MagicMock
         ev = MagicMock()
         ev.unified_msg_origin = "umo_1"
-        ev.image_result = lambda path: ("IMAGE", path)
         ev.plain_result = lambda text: ("TEXT", text)
 
         res = [r async for r in self.Main.cmd_memory_mbti(self.plug, ev)]
-        self.assertEqual(res[0][0], "IMAGE")
-        img_path = res[0][1]
-        self.assertTrue(os.path.exists(img_path))
-        self.assertTrue(img_path.endswith(".png"))
+        self.assertEqual(res[0][0], "TEXT")
+        self.assertEqual(res[0][1], "[TEXT REPORT]")
 
     async def test_force_text_arg(self):
         from unittest.mock import MagicMock
         ev = MagicMock()
         ev.unified_msg_origin = "umo_1"
-        ev.image_result = lambda path: ("IMAGE", path)
         ev.plain_result = lambda text: ("TEXT", text)
 
         res = [r async for r in self.Main.cmd_memory_mbti(self.plug, ev, arg="文本")]
         self.assertEqual(res[0][0], "TEXT")
         self.assertEqual(res[0][1], "[TEXT REPORT]")
-
-    async def test_fallback_when_render_fails(self):
-        from unittest.mock import MagicMock, patch
-        ev = MagicMock()
-        ev.unified_msg_origin = "umo_1"
-        ev.image_result = lambda path: ("IMAGE", path)
-        ev.plain_result = lambda text: ("TEXT", text)
-
-        with patch("mbti_render.render_mbti_poster_pillow", side_effect=RuntimeError("Pillow crash")):
-            res = [r async for r in self.Main.cmd_memory_mbti(self.plug, ev)]
-            self.assertEqual(res[0][0], "TEXT")
-            self.assertEqual(res[0][1], "[TEXT REPORT]")
 
     async def test_prefixless_xxti_and_arg_extraction(self):
         from unittest.mock import MagicMock
@@ -231,7 +221,6 @@ class TestCommandDeliveryBranches(unittest.IsolatedAsyncioTestCase):
         ev = MagicMock()
         ev.unified_msg_origin = "umo_1"
         ev.get_message_str = lambda: "xxti 文本"
-        ev.image_result = lambda path: ("IMAGE", path)
         ev.plain_result = lambda text: ("TEXT", text)
         stopped = []
         ev.stop_event = lambda: stopped.append(True)

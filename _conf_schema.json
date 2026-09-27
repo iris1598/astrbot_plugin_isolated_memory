@@ -186,60 +186,59 @@
       },
       "memory_mbti_enabled": {
         "type": "bool",
-        "description": "MBTI 测评报告功能（/xxti /记忆测评）",
+        "description": "鸣潮角色共鸣评测功能（xxti / /记忆测评）",
         "default": true,
-        "hint": "开启后成员可用 /xxti 或 /记忆测评 依据自己已保存的全部记忆生成 MBTI 推测报告。报告只读记忆、不写回"
+        "hint": "开启后成员可用 xxti 或 /记忆测评 依据自己已保存的全部记忆匹配最契合的鸣潮角色并生成纯文本共鸣档案。报告只读记忆、不写回"
       },
-      "memory_mbti_method": {
-        "type": "string",
-        "description": "报告生成方法",
-        "default": "anchor",
-        "options": ["anchor", "llm"],
-        "hint": "anchor=嵌入锚点比对（默认）：用记忆向量与各极锚点句算余弦，纯算术，同一批记忆必定得到同一结果，且每个维度都能追溯到具体记忆；llm=交给大模型推测，表达自然但每次结果会有波动"
+      "memory_mbti_min_memories": {
+        "type": "int",
+        "description": "生成共鸣档案所需的最少记忆条数",
+        "default": 5,
+        "hint": "记忆过少时匹配没有意义，低于该条数直接提示用户继续积累记忆，默认 5 条"
       },
-      "memory_mbti_anchor_threshold": {
-        "type": "float",
-        "description": "锚点中性判定阈值（仅 anchor 方法）",
-        "default": 0.02,
-        "hint": "两极锚点相似度差值低于该值的记忆视为中性、不参与判定。不同 embedding 模型的相似度尺度不同：若报告里几乎全部记忆都被判为中性就调低，若判定明显是噪声就调高"
+      "memory_mbti_max_chars": {
+        "type": "int",
+        "description": "参与比对的记忆文本字符上限",
+        "default": 3000,
+        "hint": "按最近使用时间倒序截取，超出部分不参与分析（下限 500）"
+      },
+      "memory_mbti_llm_commentary": {
+        "type": "bool",
+        "description": "是否调用大模型生成个性化共鸣评语（仅用于写评语，匹配排序由纯向量决定）",
+        "default": true,
+        "hint": "开启后在纯向量匹配确定角色后，调用 LLM 撰写 1~2 句生动的共鸣寄语；关闭后直接使用内置角色金句模版，实现零 Token 消耗"
       },
       "memory_mbti_provider_id": {
         "type": "string",
-        "description": "MBTI 报告专用 LLM 模型（仅 llm 方法）",
+        "description": "共鸣评语专用 LLM 模型（可选）",
         "default": "",
         "hint": "留空则使用当前会话的聊天模型。填写 Provider 的完整 ID",
         "_special": "select_provider"
       },
       "memory_mbti_timeout": {
         "type": "int",
-        "description": "MBTI 报告请求超时时间（秒，仅 llm 方法），0=不限制",
-        "default": 60,
-        "hint": "报告输出较长，建议 30-120。超时按失败处理，不写回任何内容"
+        "description": "共鸣评语 LLM 请求超时时间（秒），0=不限制",
+        "default": 15,
+        "hint": "超时将自动回退内置角色模版评语，建议 10-30"
       },
-      "memory_mbti_min_memories": {
-        "type": "int",
-        "description": "生成报告所需的最少记忆条数",
-        "default": 8,
-        "hint": "记忆过少时推测没有意义，低于该条数直接提示用户继续积累记忆"
-      },
-      "memory_mbti_max_chars": {
-        "type": "int",
-        "description": "参与报告的记忆文本字符上限",
-        "default": 3000,
-        "hint": "按最近使用时间倒序截取，超出部分不参与分析（下限 500）"
-      },
-      "memory_mbti_instruction": {
-        "type": "text",
-        "description": "MBTI 报告自定义提示词（仅 llm 方法）",
-        "default": "",
-        "hint": "只替换「任务」段落；防注入声明、分析维度与 JSON 输出协议始终保留，以免报告无法解析"
-      },
-      "memory_mbti_render_mode": {
+      "character_match_custom_dir": {
         "type": "string",
-        "description": "MBTI 报告呈现形式（图片海报 / 纯文本）",
+        "description": "自定义鸣潮角色配置目录（可选）",
+        "default": "",
+        "hint": "留空则默认读取插件内置 characters 目录。如需挂载外部目录，可填写角色 YAML 文件夹的绝对路径"
+      },
+      "character_match_output_mode": {
+        "type": "string",
+        "description": "角色共鸣档案输出形式（海报图片/纯文本/两者皆发）",
+        "options": ["image", "text", "both"],
         "default": "image",
-        "options": ["image", "text"],
-        "hint": "image=基于 Pillow 原生渲染精美紧凑海报卡片（无需浏览器依赖，含八极雷达图+双极平衡图+可能人格+极简画像，不泄露记忆证据）；text=纯文本模式；图片渲染失败时自动回退为纯文本"
+        "hint": "image: 默认发送精美「人格弹珠」风格海报图片（渲染失败自动回退纯文本）；text: 仅发送纯文本；both: 同时发送海报图片与纯文本"
+      },
+      "character_match_top_k": {
+        "type": "int",
+        "description": "全域角色共鸣度分布展示的角色数量上限",
+        "default": 5,
+        "hint": "默认仅展示契合度最高的前 5 位角色，避免后续扩充大量角色时海报过于冗长"
       }
     }
   }

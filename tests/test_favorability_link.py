@@ -176,7 +176,10 @@ class TestFavorabilityLink(unittest.TestCase):
         from astrbot.core.star.star import star_registry
 
         # 实例化真正的 FavorabilityManager
-        from astrbot_plugin_favorability.models.manager import FavorabilityManager
+        try:
+            from astrbot_plugin_favorability.models.manager import FavorabilityManager
+        except ImportError:
+            self.skipTest("未安装 astrbot_plugin_favorability 插件，跳过真实联动测试")
 
         fav_mgr = FavorabilityManager(self.data_dir)
 

@@ -47,6 +47,7 @@ THIRD_PARTY_RUNNER_KEYS = {
     "deerflow": DEERFLOW_THREAD_ID_KEY,
 }
 
+from . import character_render
 from . import favorability_bridge as FB
 from . import mbti_render
 from . import session_tools as T
@@ -801,7 +802,7 @@ class Main(Star):
             "/存档 <名称>  /读档 <名称>  /存档列表  /删档 <名称>",
             "—",
             "/记忆状态  /记忆查询 <内容>  /记忆开关 开|关  /记忆清除",
-            "xxti (或 /xxti)       依据全部记忆做锚点比对生成 MBTI 报告（免/触发）",
+            "xxti (或 /xxti)       依据全部记忆做特质比对生成鸣潮角色共鸣档案（免/触发）",
             "提示：存档即官方「同会话多对话」，WebUI 对话管理同样可见。",
         ]))
 
@@ -925,7 +926,7 @@ class Main(Star):
         r"^(?:/|/|#)?\s*(?i:(?:xxti|记忆测评|mbti|memory_mbti))(?:\s+.*)?$"
     )
     async def cmd_memory_mbti(self, event: AstrMessageEvent, arg: str = ""):
-        """依据你在当前会话保存的全部记忆生成一份 MBTI 推测报告（娱乐向，支持免/直接发送 xxti）"""
+        """依据你在当前会话保存的全部记忆生成鸣潮角色共鸣档案（纯文本娱乐向，支持免/直接发送 xxti）"""
         if await self._ensure_memory() is None:
             yield event.plain_result(self._system_off_message())
             return
@@ -935,7 +936,7 @@ class Main(Star):
             return
         if not self._mcfg("memory_mbti_enabled", True):
             yield event.plain_result(
-                "ℹ️ MBTI 测评功能已在插件配置（memory_mbti_enabled）中关闭。"
+                "ℹ️ 角色共鸣评测功能已在插件配置（memory_mbti_enabled）中关闭。"
             )
             return
 
@@ -944,13 +945,73 @@ class Main(Star):
         min_count = max(1, int(self._mcfg("memory_mbti_min_memories", 8) or 8))
         if len(entries) < min_count:
             yield event.plain_result(
-                f"ℹ️ 记忆数量不足，暂无法生成报告（当前 {len(entries)} 条，"
+                f"ℹ️ 记忆数量不足，暂无法生成共鸣档案（当前 {len(entries)} 条，"
                 f"至少需要 {min_count} 条）。\n"
                 "记忆会在日常对话中按间隔自动积累，可用 /记忆状态 查看当前条数，"
                 "或在插件配置中调低 memory_mbti_min_memories。"
             )
             return
 
+        # 优先执行鸣潮角色匹配
+        if hasattr(self.memory, "build_character_match"):
+            char_report = await self.memory.build_character_match(entries, umo=owner)
+            if char_report is not None and "top_character" in char_report:
+                if hasattr(event, "stop_event"):
+                    event.stop_event()
+
+                # 解析参数与配置（支持 xxti 文本 / xxti 图，兼顾配置项与测试桩）
+                raw_msg = ""
+                if hasattr(event, "get_message_str"):
+                    try:
+                        raw_msg = str(event.get_message_str() or "")
+                    except Exception:
+                        pass
+                full_arg = f"{arg} {raw_msg}".strip().lower()
+                force_text = any(k in full_arg for k in ("文本", "text", "txt", "plain"))
+                force_image = any(k in full_arg for k in ("图", "image", "img", "pic", "海报"))
+
+                configured_mode = str(
+                    self._mcfg("character_match_output_mode", None)
+                    or self._mcfg("memory_mbti_render_mode", "image")
+                    or "image"
+                ).strip().lower()
+
+                if force_text:
+                    output_mode = "text"
+                elif force_image:
+                    output_mode = "image"
+                else:
+                    output_mode = configured_mode
+
+                top_k = max(1, int(self._mcfg("character_match_top_k", 5) or 5))
+                custom_dir = self._mcfg("character_match_custom_dir", "") or ""
+
+                poster_sent = False
+                if output_mode in ("image", "both"):
+                    poster_path = character_render.render_character_resonance_poster(
+                        char_report,
+                        custom_dir=custom_dir,
+                        top_k=top_k,
+                    )
+                    if poster_path and poster_path.exists():
+                        if hasattr(event, "track_temporary_local_file"):
+                            event.track_temporary_local_file(str(poster_path))
+                        if hasattr(event, "image_result"):
+                            yield event.image_result(str(poster_path))
+                            poster_sent = True
+
+                # 若为纯文本模式，或海报渲染失败时优雅回退纯文本，或选择两者皆发
+                if output_mode == "text" or (output_mode in ("image", "both") and not poster_sent):
+                    yield event.plain_result(
+                        self.memory.format_character_report(char_report, top_k=top_k)
+                    )
+                elif output_mode == "both" and poster_sent:
+                    yield event.plain_result(
+                        self.memory.format_character_report(char_report, top_k=top_k)
+                    )
+                return
+
+        # 回退检查历史 MBTI 模式（兼容测试桩）
         method = (
             str(self._mcfg("memory_mbti_method", "anchor") or "anchor").strip().lower()
         )
@@ -958,67 +1019,23 @@ class Main(Star):
             report = await self.memory.build_mbti_report(
                 [entry["text"] for entry in entries], umo=owner
             )
-        else:
-            method = "anchor"
+        elif hasattr(self.memory, "build_mbti_anchor_report"):
             report = await self.memory.build_mbti_anchor_report(entries)
-        if report is None:
-            reason = (
-                "模型未返回有效结果（超时、无可用模型或返回为空）"
-                if method == "llm"
-                else "无法计算记忆向量（知识库未配置 Embedding 模型或调用失败）"
-            )
-            yield event.plain_result(
-                f"❌ 生成失败：{reason}。请稍后重试，或检查记忆系统的知识库配置。"
-            )
+        else:
+            report = None
+
+        if report is not None:
+            if hasattr(event, "stop_event"):
+                event.stop_event()
+            yield event.plain_result(self.memory.format_mbti_report(report))
             return
 
-        # 提取参数（兼容正则匹配与指令调用传参）
-        arg = (arg or "").strip()
-        if not arg and hasattr(event, "get_message_str"):
-            msg_str = (event.get_message_str() or "").strip()
-            m = re.match(
-                r"^(?:/|/|#)?\s*(?i:(?:xxti|记忆测评|mbti|memory_mbti))(?:\s+(.*))?$",
-                msg_str,
-            )
-            if m and m.group(1):
-                arg = m.group(1).strip()
-
-        # 决定渲染形式（默认优先图片海报）
-        arg_mode = arg.lower()
-        render_mode = (
-            str(self._mcfg("memory_mbti_render_mode", "image") or "image")
-            .strip()
-            .lower()
+        reason = (
+            "模型未返回有效结果（超时、无可用模型或返回为空）"
+            if method == "llm"
+            else "无法计算记忆向量（知识库未配置 Embedding 模型或调用失败）"
         )
-        if arg_mode in ("文本", "text", "txt"):
-            render_mode = "text"
-        elif arg_mode in ("图", "图片", "image", "pic"):
-            render_mode = "image"
-
-        if (
-            render_mode == "image"
-            and hasattr(event, "image_result")
-        ):
-            try:
-                user_name = (
-                    getattr(event, "sender_name", None)
-                    or getattr(getattr(event, "message_obj", None), "sender", None)
-                    and getattr(event.message_obj.sender, "nickname", None)
-                    or ""
-                )
-                img_path = mbti_render.render_mbti_poster_pillow(
-                    report, user_name=user_name
-                )
-                if img_path and os.path.exists(img_path):
-                    if hasattr(event, "stop_event"):
-                        event.stop_event()
-                    yield event.image_result(img_path)
-                    return
-            except Exception as e:
-                logger.warning(
-                    f"[IsolatedMemory] MBTI 测评 Pillow 图片渲染异常: {e}，回退至文本输出"
-                )
-
-        if hasattr(event, "stop_event"):
-            event.stop_event()
-        yield event.plain_result(self.memory.format_mbti_report(report))
+        yield event.plain_result(
+            f"❌ 生成失败：{reason}。请稍后重试，或检查记忆系统的知识库配置与 characters 角色目录。"
+        )
+        return

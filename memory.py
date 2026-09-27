@@ -31,6 +31,11 @@ from astrbot.core.knowledge_base.models import KBDocument
 from astrbot.core.knowledge_base.retrieval.tokenizer import tokenize_text
 from sqlmodel import col, delete, select
 
+try:
+    from .characters_data import CharacterProfile, get_characters
+except ImportError:
+    from characters_data import CharacterProfile, get_characters
+
 # 单条记忆的最大字符数（控制 embedding 成本与召回质量）
 ENTRY_MAX_CHARS = 200
 # 记忆文本不可为空的判定长度（行拆分回退时过滤噪声）
@@ -441,6 +446,8 @@ class MemoryManager:
         self._last_sweep: dict[str, float] = {}
         # embedding provider id -> 各极锚点句向量（锚点固定，缓存避免重复嵌入）
         self._anchor_cache: dict[str, dict[str, list[list[float]]]] = {}
+        # provider + 角色列表 -> 角色锚点句向量缓存
+        self._character_anchor_cache: dict[str, dict[str, list[list[float]]]] = {}
 
     # ── 配置读取 ───────────────────────────────────────────────
 
@@ -1813,6 +1820,258 @@ class MemoryManager:
             lines += ["", f"局限: {caveat_lines[0]}"]
             lines += [f"      {line}" for line in caveat_lines[1:] if line.strip()]
         lines += ["", footer]
+        return "\n".join(lines)
+
+    # ── 鸣潮角色共鸣匹配 ───────────────────────────────────────
+
+    async def _character_anchors(
+        self, kb: KBHelper, characters: list[CharacterProfile]
+    ) -> dict[str, list[list[float]]]:
+        """获取所有角色的锚点句嵌入向量（按 embedding provider 与角色列表缓存）。"""
+        provider_id = str(getattr(kb.kb, "embedding_provider_id", "") or "")
+        char_key = f"{provider_id}::" + ",".join(c.id for c in characters)
+        cached = self._character_anchor_cache.get(char_key)
+        if cached is not None:
+            return cached
+
+        provider = await kb.get_ep()
+        texts: list[str] = []
+        char_slices: list[tuple[str, int, int]] = []
+        for c in characters:
+            start = len(texts)
+            texts.extend(c.anchors)
+            char_slices.append((c.id, start, len(c.anchors)))
+
+        if not texts:
+            return {}
+
+        vectors = await provider.get_embeddings(texts)
+        if len(vectors) != len(texts):
+            raise ValueError(
+                f"角色锚点向量数量不匹配（期望 {len(texts)}，实际 {len(vectors)}）"
+            )
+
+        char_anchors: dict[str, list[list[float]]] = {}
+        for char_id, start, count in char_slices:
+            char_anchors[char_id] = vectors[start : start + count]
+
+        self._character_anchor_cache[char_key] = char_anchors
+        return char_anchors
+
+    async def build_character_match(
+        self, entries: list[dict], umo: str = ""
+    ) -> dict | None:
+        """基于长期记忆计算鸣潮角色契合度档案（纯向量确定性匹配，可选 LLM 评语）。"""
+        selected, truncated = self._select_entries(entries)
+        if not selected:
+            return None
+
+        custom_dir = str(self._cfg("character_match_custom_dir", "") or "").strip()
+        characters = get_characters(custom_dir=custom_dir if custom_dir else None)
+        if not characters:
+            logger.warning("[IsolatedMemory] 鸣潮角色匹配失败: 未加载到任何角色档案")
+            return None
+
+        kb = await self.ensure_kb()
+        if kb is None:
+            return None
+
+        try:
+            char_anchors = await self._character_anchors(kb, characters)
+            provider = await kb.get_ep()
+            memory_vectors = await provider.get_embeddings(
+                [entry["text"] for entry in selected]
+            )
+        except Exception as e:
+            logger.warning(f"[IsolatedMemory] 鸣潮角色共鸣匹配计算向量失败: {e}")
+            return None
+
+        if len(memory_vectors) != len(selected):
+            logger.warning("[IsolatedMemory] 记忆向量数量不匹配")
+            return None
+
+        now = time.time()
+        half_life = self._half_life_days()
+        weights: list[float] = []
+        for entry in selected:
+            updated_at = entry.get("updated_at")
+            age_days = max(0.0, (now - updated_at) / 86400.0) if updated_at else 0.0
+            weights.append(0.5 ** (age_days / half_life))
+
+        sum_w = sum(weights) or 1.0
+
+        # 对每个角色计算综合相似度得分与最强记忆依据
+        scored_chars: list[dict] = []
+        for char in characters:
+            anchors_v = char_anchors.get(char.id, [])
+            if not anchors_v:
+                continue
+
+            weighted_sim_sum = 0.0
+            best_mem_sim = -1.0
+            best_mem_text = ""
+
+            for (entry, m_vec, w) in zip(selected, memory_vectors, weights):
+                max_sim = 0.0
+                for a_vec in anchors_v:
+                    sim = _cosine(m_vec, a_vec)
+                    if sim > max_sim:
+                        max_sim = sim
+                weighted_sim_sum += max_sim * w
+
+                if max_sim > best_mem_sim:
+                    best_mem_sim = max_sim
+                    best_mem_text = entry["text"]
+
+            raw_score = weighted_sim_sum / sum_w
+            scored_chars.append({
+                "char": char,
+                "raw_score": raw_score,
+                "evidence": best_mem_text,
+            })
+
+        if not scored_chars:
+            return None
+
+        scored_chars.sort(key=lambda x: x["raw_score"], reverse=True)
+
+        top_raw = scored_chars[0]["raw_score"]
+        rankings = []
+        for item in scored_chars:
+            c = item["char"]
+            raw = item["raw_score"]
+            if top_raw > 0:
+                rel = raw / top_raw
+                resonance = _clamp_int(rel * 92, 15, 96, 50)
+            else:
+                resonance = 50
+            rankings.append({
+                "id": c.id,
+                "name": c.name,
+                "title": c.title,
+                "tagline": c.tagline,
+                "tags": c.tags,
+                "desc": c.desc,
+                "resonance": resonance,
+                "evidence": item["evidence"],
+            })
+
+        top_match = rankings[0]
+
+        # LLM 生成共鸣评语（仅用于写评语，匹配结果已在上文由纯向量确定）
+        commentary = await self._generate_character_commentary(
+            top_match=top_match,
+            umo=umo,
+        )
+
+        return {
+            "top_character": top_match,
+            "rankings": rankings,
+            "commentary": commentary,
+            "sample_count": len(entries),
+            "used_count": len(selected),
+            "truncated": truncated,
+        }
+
+    async def _generate_character_commentary(
+        self, top_match: dict, umo: str = ""
+    ) -> str:
+        """调用 LLM 生成 1~2 句角色共鸣评语；失败或关闭时回退内置模版。"""
+        enable_llm = bool(self._cfg("memory_mbti_llm_commentary", True))
+        if not enable_llm:
+            return self._default_commentary(top_match)
+
+        char_name = top_match.get("name", "")
+        char_title = top_match.get("title", "")
+        char_tags = "、".join(top_match.get("tags", []))
+        char_tagline = top_match.get("tagline", "")
+        evidence = _clip_text(top_match.get("evidence", ""), 60)
+
+        prompt = (
+            f"你是鸣潮频率共振诊断仪。经记忆向量测算，用户与鸣潮角色【{char_name}】共鸣度最高。\n"
+            f"角色称号：{char_title}\n"
+            f"角色性格特质：{char_tags}\n"
+            f"角色代表台词：{char_tagline}\n"
+            f"最契合的用户记忆：{evidence}\n\n"
+            "请结合该角色的性格特质与上述记忆依据，写一段 1~2 句话（不超过 70 字）的共鸣解析与寄语。\n"
+            "要求：语气温和细腻、体现心智共振与同调感，直接输出寄语正文，不要输出标题、前缀、Markdown代码块或解释。"
+        )
+
+        timeout = float(self._cfg("memory_mbti_timeout", 15) or 15)
+        provider_id = self._mbti_provider_id()
+        try:
+            result = await self._llm_chat(
+                prompt=prompt,
+                provider_id=provider_id,
+                timeout=timeout,
+                umo=umo,
+            )
+            if result and len(result.strip()) > 5:
+                cleaned = result.strip().strip('"').strip("“").strip("”")
+                return cleaned
+        except Exception as e:
+            logger.debug(f"[IsolatedMemory] 生成角色共鸣评语失败: {e}")
+
+        return self._default_commentary(top_match)
+
+    @staticmethod
+    def _default_commentary(top_match: dict) -> str:
+        tags_str = " · ".join(top_match.get("tags", [])[:3])
+        tagline = top_match.get("tagline", "")
+        name = top_match.get("name", "")
+        if tagline:
+            return f"你在日常记录中展现出【{tags_str}】的心智特质，与【{name}】的心智同频共振。正如其言：‘{tagline}’"
+        return f"你在日常对话与记录中展现出【{tags_str}】的精神特质，与【{name}】的心智频率高度同调。"
+
+    def format_character_report(self, report: dict, top_k: int = 5) -> str:
+        """将角色共鸣报告渲染为优雅的纯文本消息。
+
+        Args:
+            report: 角色共鸣评测数据字典。
+            top_k: 全域共鸣度分布展示的角色数量上限，默认仅展示前 5 名。
+        """
+        top = report.get("top_character") or {}
+        name = top.get("name", "未知")
+        resonance = top.get("resonance", 0)
+        tagline = top.get("tagline", "")
+        title = top.get("title", "")
+        tags = top.get("tags") or []
+        commentary = report.get("commentary", "")
+        rankings = (report.get("rankings") or [])[: max(1, top_k)]
+
+        header = "【漂泊者记忆 · 鸣潮角色共鸣档案】"
+        lines = [
+            header,
+            f"✦ 核心共鸣角色：【{name}】（契合度 {resonance}%）",
+        ]
+        if title:
+            lines.append(f"✦ 角色定位：{title}")
+        if tagline:
+            lines.append(f"「{tagline}」")
+
+        if tags:
+            lines += ["", f"✦ 特质契合：{' · '.join(tags)}"]
+
+        if commentary:
+            lines += ["", f"✦ 共鸣解析：{commentary}"]
+
+        if rankings:
+            lines += ["", "✦ 全域角色共鸣度分布："]
+            for r in rankings:
+                r_name = r.get("name", "")
+                r_res = r.get("resonance", 0)
+                pad_name = f"{r_name:<4}" if len(r_name) <= 3 else f"{r_name}"
+                bar = _mbti_bar(r_res, width=10)
+                lines.append(f"• {pad_name} {bar} {r_res}%")
+
+        sample = report.get("sample_count", 0)
+        used = report.get("used_count", 0)
+        detail = f"基于最近 {used} 条长期记忆推测生成"
+        if report.get("truncated"):
+            detail = f"共 {sample} 条记忆，取最近 {used} 条参与比对"
+        lines += ["", f"✦ 样本依据：{detail}"]
+        lines.append("⚠️ 本档案由记忆向量与角色特质比对生成，仅供娱乐参考。")
+
         return "\n".join(lines)
 
     # ── LLM 调用 ───────────────────────────────────────────────
