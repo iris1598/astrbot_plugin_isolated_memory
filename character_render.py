@@ -277,7 +277,7 @@ def render_character_resonance_poster(
             draw,
             (26, 26, W - 26, H - 26),
             radius=28,
-            outline=(255, 255, 255, 180),
+            outline=(255, 255, 255, 255),
             width=3,
         )
 
@@ -322,9 +322,9 @@ def render_character_resonance_poster(
             font=_get_font(14, bold=False),
             fill=(138, 92, 102, 255),
         )
-        draw.line([(44, 106), (W - 44, 106)], fill=(230, 180, 150, 180), width=2)
+        draw.line([(44, 106), (W - 44, 106)], fill=(230, 180, 150, 255), width=2)
 
-        # 4. Hero 区域：中央角色卡片
+        # 4. Hero 区域：中央角色卡片（纯白实心无透明度底板）
         hero_card_top = 126
         hero_card_h = 360
         hero_box = (44, hero_card_top, W - 44, hero_card_top + hero_card_h)
@@ -333,7 +333,7 @@ def render_character_resonance_poster(
             draw,
             hero_box,
             radius=24,
-            fill=(255, 255, 255, 220),
+            fill=(255, 255, 255, 255),
             outline=(242, 192, 158, 255),
             width=2,
         )
@@ -472,7 +472,7 @@ def render_character_resonance_poster(
             fill=(255, 255, 255, 255),
         )
         draw.text(
-            (info_x + 104, cur_y + 6),
+            (info_x + 104, cur_y + 1),
             f"{resonance}%",
             font=_get_font(34, bold=True),
             fill=(255, 255, 255, 255),
@@ -511,7 +511,7 @@ def render_character_resonance_poster(
                 fill=(140, 80, 90, 255),
             )
 
-        # 5. 中间：漫画气泡风格的共鸣解析
+        # 5. 中间：漫画气泡风格的共鸣解析（纯白实心无透明度底板）
         bubble_top = hero_card_top + hero_card_h + 20
         bubble_h = 170
         bubble_box = (44, bubble_top, W - 44, bubble_top + bubble_h)
@@ -520,8 +520,8 @@ def render_character_resonance_poster(
             draw,
             bubble_box,
             radius=22,
-            fill=(255, 255, 255, 235),
-            outline=(238, 76, 90, 200),
+            fill=(255, 255, 255, 255),
+            outline=(238, 76, 90, 255),
             width=2,
         )
 
@@ -575,7 +575,7 @@ def render_character_resonance_poster(
                 fill=(190, 60, 75, 255),
             )
 
-        # 6. 下部：全域角色共鸣度分布卡片 (默认仅展示 Top 5)
+        # 6. 下部：全域角色共鸣度分布卡片（纯白实心无透明度底板）
         dist_top = bubble_top + bubble_h + 24
         dist_h = 390
         dist_box = (44, dist_top, W - 44, dist_top + dist_h)
@@ -584,7 +584,7 @@ def render_character_resonance_poster(
             draw,
             dist_box,
             radius=22,
-            fill=(255, 255, 255, 235),
+            fill=(255, 255, 255, 255),
             outline=(242, 192, 158, 255),
             width=2,
         )

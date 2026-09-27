@@ -283,6 +283,33 @@ quotes:
             pass
 
 
+    def test_json_character_file_loading(self):
+        """验证支持从 JSON 格式动态加载角色档案。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        from astrbot_plugin_isolated_session import characters_data
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sample_json = {
+                "id": "jiyan",
+                "name": "忌炎",
+                "title": "夜归军领军",
+                "tagline": "虽千万人，吾往矣。",
+                "tags": ["沉稳坚毅", "统帅大局"],
+                "desc": "夜归军领军",
+                "quotes": ["虽千万人，吾往矣。"],
+                "anchors": ["用户性格沉稳刚毅，具有统领大局的领袖气质"],
+            }
+            json_file = Path(tmp_dir) / "jiyan.json"
+            json_file.write_text(json.dumps(sample_json, ensure_ascii=False), encoding="utf-8")
+
+            chars = characters_data.get_characters(custom_dir=tmp_dir, force_reload=True)
+            self.assertEqual(len(chars), 1)
+            self.assertEqual(chars[0].name, "忌炎")
+            self.assertEqual(chars[0].id, "jiyan")
+
+
 if __name__ == "__main__":
     unittest.main()
 

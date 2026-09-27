@@ -84,14 +84,22 @@ def get_characters(
 
     characters: list[CharacterProfile] = []
     if target_dir.is_dir():
-        for file in sorted(target_dir.glob("*.yaml")) + sorted(target_dir.glob("*.yml")):
+        for file in (
+            sorted(target_dir.glob("*.yaml"))
+            + sorted(target_dir.glob("*.yml"))
+            + sorted(target_dir.glob("*.json"))
+        ):
             char = load_character_file(file)
             if char:
                 characters.append(char)
 
     # 如果指定自定义目录但未读取到角色，回退内置目录
     if not characters and target_dir != DEFAULT_CHARACTERS_DIR and DEFAULT_CHARACTERS_DIR.is_dir():
-        for file in sorted(DEFAULT_CHARACTERS_DIR.glob("*.yaml")) + sorted(DEFAULT_CHARACTERS_DIR.glob("*.yml")):
+        for file in (
+            sorted(DEFAULT_CHARACTERS_DIR.glob("*.yaml"))
+            + sorted(DEFAULT_CHARACTERS_DIR.glob("*.yml"))
+            + sorted(DEFAULT_CHARACTERS_DIR.glob("*.json"))
+        ):
             char = load_character_file(file)
             if char:
                 characters.append(char)
