@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import tempfile
 from pathlib import Path
@@ -316,9 +317,10 @@ def render_character_resonance_poster(
             font=_get_font(24, bold=True),
             fill=(66, 24, 38, 255),
         )
+        archive_code = f"#{random.randint(10000000, 99999999)}"
         draw.text(
             (W - 200, header_y + 16),
-            "档案码: #102597017",
+            f"档案码: {archive_code}",
             font=_get_font(14, bold=False),
             fill=(138, 92, 102, 255),
         )
