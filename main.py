@@ -158,7 +158,15 @@ class Main(Star):
             if persona:
                 event.set_extra("_isolated_memory_persona", persona)
 
-            hits = await self.memory.recall(owner, req.prompt.strip())
+            prompt_text = req.prompt.strip()
+            search_query = prompt_text
+            # 上下文增强检索（Context Expansion）：短文本查询时尝试从上一轮助手发言补充上下文
+            if len(prompt_text) <= 15 and bool(self._mcfg("memory_context_expansion", True)):
+                prev_text = await self._get_recent_assistant_context(owner)
+                if prev_text:
+                    search_query = f"{prev_text} {prompt_text}"
+
+            hits = await self.memory.recall(owner, search_query)
             if hits:
                 req.extra_user_content_parts.append(
                     TextPart(text=self.memory.format_injection(hits)).mark_as_temp()
@@ -324,6 +332,25 @@ class Main(Star):
         except Exception:
             pass
         return None
+
+    async def _get_recent_assistant_context(self, owner: str) -> str:
+        """获取当前会话上一轮助手的简要回复（用于短文本查询扩展）。"""
+        try:
+            cid = await self._conv_mgr.get_curr_conversation_id(owner)
+            if not cid:
+                return ""
+            conv = await self._conv_mgr.get_conversation(owner, cid)
+            if not conv:
+                return ""
+            history = T.parse_history(conv)
+            for msg in reversed(history):
+                if isinstance(msg, dict) and msg.get("role") == "assistant":
+                    content = str(msg.get("content") or "").strip()
+                    if content:
+                        return content[-30:].replace("\n", " ").strip()
+        except Exception:
+            pass
+        return ""
 
     # ── 记忆：抽取间隔缓冲（与旧插件键格式兼容，迁移后可无缝续用）──
 
@@ -801,10 +828,91 @@ class Main(Star):
             "/会话压缩 [保留条数]  手动 LLM 摘要压缩（默认保留 5 条，0=全部）",
             "/存档 <名称>  /读档 <名称>  /存档列表  /删档 <名称>",
             "—",
-            "/记忆状态  /记忆查询 <内容>  /记忆开关 开|关  /记忆清除",
+            "/记忆状态  /记忆查询 <内容>  /记忆添加 <内容>  /记忆开关 开|关  /记忆清除",
             "xxti (或 /xxti)       依据全部记忆做特质比对生成鸣潮角色共鸣档案（免/触发）",
             "提示：存档即官方「同会话多对话」，WebUI 对话管理同样可见。",
         ]))
+
+    # ══════════════════════════════════════════════════════════
+    #  记忆：Agent 函数调用工具（主动记忆 / 主动回忆）
+    # ══════════════════════════════════════════════════════════
+
+    @filter.llm_tool(name="memorize_user_memory")
+    async def memorize_user_memory(
+        self,
+        event: AstrMessageEvent,
+        content: str,
+        importance: float = 0.8,
+        fact_type: str = "factual",
+    ) -> str:
+        """当用户明确要求记住特定事实、个人信息、偏好习惯或重要约定时调用此工具记录长期记忆。
+
+        Args:
+            content(string): 提炼后的具体记忆内容，必须是独立、客观、脱离上下文也能理解的陈述句（如“用户喜欢喝无糖乌龙茶”）
+            importance(number): 重要性程度（0.1至1.0），默认0.8。偏好/禁忌/生理信息给0.8~0.95，常规偏好/事实给0.6~0.75，临时约定给0.3~0.5
+            fact_type(string): 事实类型，可选值: preference(偏好/禁忌), factual(稳定事实), planned(约定/计划), episodic(经历)
+        """
+        if await self._ensure_memory() is None:
+            return "记忆系统未启用。"
+        owner = event.unified_msg_origin
+        if not await sp.session_get(owner, "memory_enabled", True):
+            return "该用户的记忆功能已关闭。"
+        if (
+            getattr(event.message_obj, "group_id", None)
+            and self._group_gate(event) is None
+        ):
+            return "当前群聊未启用记忆功能。"
+
+        content = (content or "").strip()
+        if not content:
+            return "记忆内容不能为空。"
+
+        ok = await self.memory.add_memory(
+            owner=owner,
+            text=content,
+            importance=importance,
+            fact_type=fact_type,
+        )
+        if ok:
+            return f"已成功记入长期记忆：{content}"
+        return "记录记忆失败，请稍后重试。"
+
+    @filter.llm_tool(name="recall_user_memory")
+    async def recall_user_memory(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+    ) -> str:
+        """当回答用户问题需要查询用户的过往个人偏好、背景事实、习惯或历史约定，且当前提示未包含时主动搜索记忆。
+
+        Args:
+            query(string): 检索查询词或问题描述（例如“喜欢的饮料”、“过敏食物”、“生日”）
+        """
+        if await self._ensure_memory() is None:
+            return "记忆系统未启用。"
+        owner = event.unified_msg_origin
+        if not await sp.session_get(owner, "memory_enabled", True):
+            return "该用户的记忆功能已关闭。"
+        if (
+            getattr(event.message_obj, "group_id", None)
+            and self._group_gate(event) is None
+        ):
+            return "当前群聊未启用记忆功能。"
+
+        query = (query or "").strip()
+        if not query:
+            return "查询词不能为空。"
+
+        hits = await self.memory.recall(owner, query, top_k=3)
+        if not hits:
+            return "未找到相关的过往记忆。"
+
+        lines = ["检索到的相关用户记忆："]
+        for h in hits:
+            age = float(h.get("age_days") or 0.0)
+            label = "今天" if age < 1 else f"约{int(age)}天前"
+            lines.append(f"- {h['text']}（{label}）")
+        return "\n".join(lines)
 
     # ══════════════════════════════════════════════════════════
     #  记忆：用户命令
@@ -847,6 +955,7 @@ class Main(Star):
             f"每次注入: 最多 {top_k} 条",
             "",
             "使用 /记忆查询 <内容> 预览召回结果",
+            "使用 /记忆添加 <内容> 手动添加一条记忆",
             "使用 /记忆清除 清空当前记忆",
             "使用 /记忆开关 开|关 切换",
         ]
@@ -894,7 +1003,7 @@ class Main(Star):
 
     @filter.command("记忆查询", alias={"memory_query"})
     async def cmd_memory_query(self, event: AstrMessageEvent, query: GreedyStr):
-        """预览记忆的召回结果（含衰减后分数），用于调试衰减效果"""
+        """预览记忆的召回结果（含衰减与重要性加权分），用于调试召回效果"""
         if await self._ensure_memory() is None:
             yield event.plain_result(self._system_off_message())
             return
@@ -911,16 +1020,41 @@ class Main(Star):
         if not hits:
             yield event.plain_result("🔍 未召回相关记忆。")
             return
-        lines = ["🔍 记忆召回结果（按衰减后分数排序）:"]
+        lines = ["🔍 记忆召回结果（按加权有效分排序）:"]
         for i, hit in enumerate(hits, 1):
             age = float(hit.get("age_days") or 0.0)
             age_label = "今天" if age < 1 else f"{int(age)}天前"
+            imp = hit.get("importance", 0.6)
+            ft = hit.get("type", "factual")
             lines.append(
                 f"{i}. {hit['text']}\n"
                 f"   相似度={hit.get('similarity', 0):.3f} "
-                f"衰减分={hit.get('effective', 0):.4f}（{age_label}）"
+                f"有效分={hit.get('effective', 0):.4f}（{age_label} | 重要度={imp} | 类型={ft}）"
             )
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("记忆添加", alias={"memory_add", "add_memory"})
+    async def cmd_memory_add(self, event: AstrMessageEvent, content: GreedyStr):
+        """手动向你在当前会话的长期记忆库中添加一条记录"""
+        if await self._ensure_memory() is None:
+            yield event.plain_result(self._system_off_message())
+            return
+        reason = self._gate_block_reason(event)
+        if reason:
+            yield event.plain_result("❌ " + reason)
+            return
+        content_str = (str(content) or "").strip()
+        if not content_str:
+            yield event.plain_result("用法: /记忆添加 <要记住的具体内容>")
+            return
+        owner = event.unified_msg_origin
+        ok = await self.memory.add_memory(
+            owner, content_str, importance=0.9, fact_type="factual"
+        )
+        if ok:
+            yield event.plain_result(f"✅ 已记录记忆：\n{content_str}")
+        else:
+            yield event.plain_result("❌ 记录记忆失败，请检查知识库配置。")
 
     @filter.regex(
         r"^(?:/|/|#)?\s*(?i:(?:xxti|记忆测评|mbti|memory_mbti))(?:\s+.*)?$"

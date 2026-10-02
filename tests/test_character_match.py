@@ -244,7 +244,10 @@ quotes:
 
     def test_character_render_and_image_lookup(self):
         """测试角色头像检索、Top 5 截断与海报生成。"""
-        from astrbot_plugin_isolated_session import character_render
+        try:
+            from astrbot_plugin_isolated_memory import character_render
+        except ImportError:
+            import character_render
 
         # 验证能自动检索到角色素材
         img_aemis = character_render.find_character_image("爱弥斯")
@@ -288,7 +291,10 @@ quotes:
         import json
         import tempfile
         from pathlib import Path
-        from astrbot_plugin_isolated_session import characters_data
+        try:
+            from astrbot_plugin_isolated_memory import characters_data
+        except ImportError:
+            import characters_data
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             sample_json = {

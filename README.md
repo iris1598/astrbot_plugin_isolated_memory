@@ -37,30 +37,43 @@ AstrBot 官方对话体系（`ConversationManager`）与
 | 命令 | 说明 |
 |------|------|
 | `/记忆状态`（memory_status） | 条数、时间、Token、衰减参数、owner |
-| `/记忆查询 <内容>`（memory_query） | 召回预览（相似度/衰减分/天数） |
+| `/记忆查询 <内容>`（memory_query） | 召回预览（相似度/有效分/重要度/类型/天数） |
+| `/记忆添加 <内容>`（memory_add） | 手动录入一条记忆（默认 0.9 高重要度，受清扫保护） |
 | `/记忆开关 开\|关`（memory_toggle） | 按成员开关 |
 | `/记忆清除`（memory_clear） | 清空当前群×成员的全部记忆 |
 | `xxti`（或 `/xxti` / `/记忆测评`） | 依据全部已保存记忆生成 MBTI 测评海报（免/触发，只读不写） |
 
-## 记忆工作原理
+## 记忆工作原理与增强特性
 
 ```
-on_llm_request：捕获人设 → 混合检索(稠密+BM25+RRF, 按 memory_owner 过滤)
-  → 衰减打分 effective = 融合分 × 0.5^(天数/半衰期) → top_k 临时注入（不入历史）
-  → 被注入的记忆刷新时间戳（回忆强化）；惰性清扫（TTL 删除 + LRU 裁剪）
-on_llm_response：每 memory_extract_interval 轮把积累的对话交给抽取模型
-  → 去重（≥dup_threshold 只强化）→ 写入共享知识库（后台任务不阻塞回复）
+on_llm_request：捕获人设 → 短查询上下文感知扩展(可选)
+  → 混合检索(稠密+BM25+RRF, 严格按 memory_owner 隔离过滤)
+  → MMR 最大边际相关度多样性重排(防止相近语义挤占 top-k)
+  → 多因子加权评分：有效分 = 0.50×相关度 + 0.20×重要度 + 0.30×0.5^(天数/半衰期)
+  → 提取 top_k 临时注入 prompt（不入会话历史）
+  → 被注入记忆刷新时间戳（回忆强化）；惰性清扫（高重要性保护 + TTL + LRU）
+on_llm_response：每 memory_extract_interval 轮异步抽取结构化事实
+  → 提取 content + importance(0.1~1.0) + fact_type(偏好/事实/计划/经历)
+  → 去重写入共享知识库（100% 向后兼容旧格式）
+Agent 函数调用(Tool Calling)：
+  → memorize_user_memory：Agent 在对话中主动将关键信息记入用户记忆
+  → recall_user_memory：Agent 自主按需检索该用户的长期记忆
 ```
+
+- **全量向后兼容**：旧版本或旧插件迁移的纯文本 Chunk 无需任何数据库迁移，读取时自动回落为默认重要度（0.6）与通用类型，统一参与评分与召回。
+- **高重要性永久保护**：重要度 $\ge 0.85$ 的核心记忆（如姓名、忌口、家庭、重要关系）受保护，不会因时间流逝被 TTL 清扫或 LRU 淘汰。
+- **纯独立单人隔离**：不依赖任何复杂的跨人关系图谱与图数据库，完全基于 `unique_session` UMO 维度严格隔离，杜绝跨用户串记忆与隐私泄漏风险。
 
 ## 配置
 
 - `memory_groups`：启用记忆的群列表（group_id / group_name / memory_enabled）。
   **为空时自动兼容读取旧插件的 `whitelist_groups` 结构**，配置可直接粘贴。
-- `memory` 分组：与旧插件「记忆系统」分组同名同义
-  （`memory_enabled / memory_kb_name / memory_extract_* / memory_half_life_days /
-  memory_ttl_days / memory_inject_* / memory_fetch_k / memory_dup_threshold /
-  memory_max_docs_per_user / memory_sweep_interval_minutes /
-  memory_consolidate_enabled / memory_reset_with_session`）。
+- `memory` 分组：
+  - `memory_enabled / memory_kb_name`：全局开关与知识库名称绑定。
+  - `memory_mmr_enabled`（默认 true）：MMR 多样性去重重排，避免召回内容语义重复。
+  - `memory_protect_important`（默认 true）：保护重要度 $\ge 0.85$ 的核心记忆不被 TTL/LRU 淘汰。
+  - `memory_context_expansion`（默认 true）：针对短用户提问（$\le 15$ 字），自动融合上一轮对话语境以提升检索召回率。
+  - `memory_extract_* / memory_half_life_days / memory_ttl_days / memory_inject_* / memory_fetch_k / memory_dup_threshold / memory_max_docs_per_user / memory_sweep_interval_minutes` 等衰减与容量参数。
 - `memory_reset_with_session`（默认 false）：**开启后 `/会话重置` 会同步清空
   该成员在当前群的记忆**（即旧插件的重置-清记忆联动）。
 - `favorability_reset_eval_with_session`（默认 true）：**若安装了 `astrbot_plugin_favorability`，

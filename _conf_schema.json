@@ -178,6 +178,24 @@
         "default": false,
         "hint": "开启后清扫时会额外消耗一次 LLM 调用"
       },
+      "memory_mmr_enabled": {
+        "type": "bool",
+        "description": "MMR 召回多样性去重",
+        "default": true,
+        "hint": "基于最大边际相关性算法打散候选记忆，防止同质/重复偏好塞满注入窗口"
+      },
+      "memory_protect_important": {
+        "type": "bool",
+        "description": "核心重要记忆保护",
+        "default": true,
+        "hint": "重要度 ≥0.85 的关键事实/偏好（如过敏、姓名、长期设定）豁免 TTL 过期删除"
+      },
+      "memory_context_expansion": {
+        "type": "bool",
+        "description": "短文本上下文查询扩展",
+        "default": true,
+        "hint": "用户输入 <=15 字符时，拼接上一轮助手的回复片段参与检索，避免短语脱靶"
+      },
       "memory_reset_with_session": {
         "type": "bool",
         "description": "/会话重置 时是否一并清空该用户记忆",

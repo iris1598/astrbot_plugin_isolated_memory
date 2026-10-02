@@ -41,6 +41,34 @@ ENTRY_MAX_CHARS = 200
 # 记忆文本不可为空的判定长度（行拆分回退时过滤噪声）
 MIN_FACT_CHARS = 4
 
+
+class ExtractedFact(str):
+    """抽取的事实单元，继承自 str 以保持 100% 向后兼容。"""
+
+    content: str
+    importance: float
+    fact_type: str
+
+    def __new__(
+        cls,
+        content: str,
+        importance: float = 0.6,
+        fact_type: str = "factual",
+    ):
+        s = super().__new__(cls, content)
+        s.content = str(content)
+        s.importance = max(0.1, min(1.0, float(importance)))
+        s.fact_type = str(fact_type)
+        return s
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "content": self.content,
+            "importance": self.importance,
+            "type": self.fact_type,
+        }
+
+
 # ── MBTI 测评报告（娱乐向推测）──
 MBTI_DIMENSIONS = ("E/I", "S/N", "T/F", "J/P")
 # 每个维度对应的 (维度名, 正极字母, 负极字母)，正极仅决定参与比较的两极
@@ -513,6 +541,12 @@ class MemoryManager:
     def _consolidate_enabled(self) -> bool:
         return bool(self._cfg("memory_consolidate_enabled", False))
 
+    def _mmr_enabled(self) -> bool:
+        return bool(self._cfg("memory_mmr_enabled", True))
+
+    def _protect_important(self) -> bool:
+        return bool(self._cfg("memory_protect_important", True))
+
     # ── 知识库解析 ─────────────────────────────────────────────
 
     async def ensure_kb(self) -> KBHelper | None:
@@ -544,13 +578,61 @@ class MemoryManager:
 
     # ── 召回（含衰减与强化）────────────────────────────────────
 
+    @staticmethod
+    def _apply_mmr(
+        candidates: list[dict], top_k: int, mmr_lambda: float = 0.7
+    ) -> list[dict]:
+        """轻量级最大边际相关性（MMR）去重，避免语义高度重叠的记忆占据全部 Top-K。
+
+        基于中文/字符 N-gram 及单字集合计算 Jaccard 相似度，0 外部依赖。
+        """
+        if len(candidates) <= top_k or top_k <= 1:
+            return candidates[:top_k]
+
+        def _tokenize(text: str) -> set[str]:
+            t = (text or "").strip().lower()
+            chars = set(t)
+            bigrams = {t[i : i + 2] for i in range(len(t) - 1)}
+            return chars | bigrams if (chars or bigrams) else {"<empty>"}
+
+        selected: list[dict] = []
+        pool = list(candidates)
+
+        while pool and len(selected) < top_k:
+            if not selected:
+                selected.append(pool.pop(0))
+                continue
+
+            best_idx = -1
+            best_mmr_score = -float("inf")
+            selected_tokens = [_tokenize(s.get("text", "")) for s in selected]
+
+            for i, cand in enumerate(pool):
+                cand_tokens = _tokenize(cand.get("text", ""))
+                max_sim = max(
+                    len(cand_tokens & st) / max(len(cand_tokens | st), 1)
+                    for st in selected_tokens
+                )
+                cand_score = float(cand.get("effective", 0.0))
+                mmr_val = mmr_lambda * cand_score - (1.0 - mmr_lambda) * max_sim
+                if mmr_val > best_mmr_score:
+                    best_mmr_score = mmr_val
+                    best_idx = i
+
+            if best_idx >= 0:
+                selected.append(pool.pop(best_idx))
+            else:
+                break
+
+        return selected
+
     async def recall(
         self,
         owner: str,
         query: str,
         top_k: int | None = None,
     ) -> list[dict]:
-        """按衰减后有效分数召回某用户的记忆，并对入选记忆做强化刷新。
+        """按衰减与重要性加权后有效分数召回某用户的记忆，并对入选记忆做强化刷新。
 
         Args:
             owner: 记忆归属键（隔离 UMO）。
@@ -558,7 +640,7 @@ class MemoryManager:
             top_k: 返回条数，默认取配置 memory_inject_top_k。
 
         Returns:
-            list[dict]: [{doc_id, text, similarity, age_days, effective}]，
+            list[dict]: [{doc_id, text, similarity, age_days, effective, importance, type}]，
             按 effective 降序；任何异常返回空列表。
         """
         query = (query or "").strip()
@@ -590,16 +672,42 @@ class MemoryManager:
         ttl_secs = self._ttl_days() * 86400.0
         half_life = self._half_life_days()
         min_score = self._min_score()
+        protect_important = self._protect_important()
+
+        max_fused = max((t[1] for t in fused), default=1.0) or 1.0
 
         hits: list[dict] = []
-        for doc_id, fscore, text, updated_at, similarity in fused:
+        for item in fused:
+            doc_id = item[0]
+            fscore = item[1]
+            text = item[2]
+            updated_at = item[3]
+            similarity = item[4]
+            metadata = item[5] if len(item) > 5 and isinstance(item[5], dict) else {}
+
+            importance = float(metadata.get("importance", 0.6) or 0.6)
+            fact_type = str(metadata.get("type", "factual") or "factual")
+
             age_days = max(0.0, (now - updated_at) / 86400.0) if updated_at else 0.0
+
+            # 约定/计划失效判断
+            expires_at = metadata.get("expires_at")
+            if expires_at and now > float(expires_at):
+                continue
+
+            # 遗忘阈值判断（重要度 >= 0.85 在开启保护时豁免）
             if ttl_secs > 0 and age_days * 86400.0 > ttl_secs:
-                continue  # 已超过遗忘阈值，不注入
-            decay = 0.5 ** (age_days / half_life)
-            effective = fscore * decay
+                if not (protect_important and importance >= 0.85):
+                    continue
+
+            # 加权打分模型（结合相关度、重要度与时间衰减）
+            relevance = fscore / max_fused
+            recency = 0.5 ** (age_days / half_life)
+            effective = 0.50 * relevance + 0.20 * importance + 0.30 * recency
+
             if effective < min_score:
                 continue
+
             hits.append(
                 {
                     "doc_id": doc_id,
@@ -607,10 +715,18 @@ class MemoryManager:
                     "similarity": round(float(similarity), 4),
                     "age_days": round(age_days, 2),
                     "effective": round(float(effective), 6),
+                    "importance": round(importance, 2),
+                    "type": fact_type,
                 }
             )
+
         hits.sort(key=lambda h: h["effective"], reverse=True)
-        selected = hits[:top_k]
+
+        # MMR 多样性打散（避免语义高度同质的记忆占满 Top-K）
+        if self._mmr_enabled() and len(hits) > 1:
+            selected = self._apply_mmr(hits, top_k)
+        else:
+            selected = hits[:top_k]
 
         # 召回强化：刷新入选记忆的 updated_at（免重新嵌入）
         for hit in selected:
@@ -629,7 +745,7 @@ class MemoryManager:
             limit: FTS 返回上限。
 
         Returns:
-            list[dict]: [{doc_id, text, score, updated_at}]，按 BM25 分降序。
+            list[dict]: [{doc_id, text, score, updated_at, metadata}]，按 BM25 分降序。
         """
         try:
             ds = vec_db.document_storage
@@ -657,6 +773,7 @@ class MemoryManager:
                     "text": row["text"],
                     "score": -float(raw_score) if raw_score is not None else 0.0,
                     "updated_at": _parse_ts(row.get("updated_at")),
+                    "metadata": md,
                 }
             )
         out.sort(key=lambda x: x["score"], reverse=True)
@@ -671,17 +788,28 @@ class MemoryManager:
             sparse: _sparse_recall 结果。
 
         Returns:
-            list[tuple]: [(doc_id, fused_score, text, updated_at_ts, dense_similarity)]，
+            list[tuple]: [(doc_id, fused_score, text, updated_at_ts, dense_similarity, metadata)]，
             按 fused_score 降序。
         """
         entries: dict[str, dict] = {}
 
-        dense_sorted = sorted(dense, key=lambda r: r.similarity, reverse=True)
+        dense_sorted = sorted(
+            dense, key=lambda r: getattr(r, "similarity", 0.0), reverse=True
+        )
         for rank, res in enumerate(dense_sorted, 1):
-            d = res.data
+            d = getattr(res, "data", {}) or {}
             doc_id = d.get("doc_id")
             if not doc_id:
                 continue
+            raw_md = d.get("metadata")
+            md = {}
+            if isinstance(raw_md, dict):
+                md = raw_md
+            elif isinstance(raw_md, str):
+                try:
+                    md = json.loads(raw_md)
+                except Exception:
+                    md = {}
             entry = entries.setdefault(
                 doc_id,
                 {
@@ -689,10 +817,13 @@ class MemoryManager:
                     "sparse_rank": None,
                     "text": d.get("text", ""),
                     "updated_at": _parse_ts(d.get("updated_at")),
-                    "similarity": float(res.similarity),
+                    "similarity": float(getattr(res, "similarity", 0.0)),
+                    "metadata": md,
                 },
             )
             entry["dense_rank"] = rank
+            if not entry.get("metadata") and md:
+                entry["metadata"] = md
 
         for rank, item in enumerate(sparse, 1):
             entry = entries.get(item["doc_id"])
@@ -703,8 +834,11 @@ class MemoryManager:
                     "text": item["text"],
                     "updated_at": item.get("updated_at"),
                     "similarity": 0.0,
+                    "metadata": item.get("metadata") or {},
                 }
             entry["sparse_rank"] = rank
+            if not entry.get("metadata") and item.get("metadata"):
+                entry["metadata"] = item["metadata"]
 
         results = []
         for doc_id, e in entries.items():
@@ -713,7 +847,14 @@ class MemoryManager:
                 score += 1.0 / (60.0 + e["dense_rank"])
             if e["sparse_rank"]:
                 score += 1.0 / (60.0 + e["sparse_rank"])
-            results.append((doc_id, score, e["text"], e["updated_at"], e["similarity"]))
+            results.append((
+                doc_id,
+                score,
+                e["text"],
+                e["updated_at"],
+                e["similarity"],
+                e.get("metadata") or {},
+            ))
         results.sort(key=lambda t: t[1], reverse=True)
         return results
 
@@ -823,12 +964,20 @@ class MemoryManager:
         except Exception as e:
             logger.debug(f"[IsolatedMemory] 同步记忆虚拟文档失败: {e}")
 
-    async def add_memory(self, owner: str, text: str) -> bool:
+    async def add_memory(
+        self,
+        owner: str,
+        text: str,
+        importance: float | None = None,
+        fact_type: str | None = None,
+    ) -> bool:
         """写入一条记忆；若与现有记忆高度相似则强化现有条目而非重复写入。
 
         Args:
             owner: 记忆归属键（隔离 UMO）。
             text: 记忆文本。
+            importance: 重要度数值（0.1~1.0），未传时优先从 text 属性获取，默认 0.6。
+            fact_type: 事实类型（preference/factual/planned/episodic），未传时从 text 属性获取，默认 factual。
 
         Returns:
             bool: 是否成功写入或强化了现有记忆。
@@ -837,6 +986,19 @@ class MemoryManager:
         if not text:
             return False
         text = text[:ENTRY_MAX_CHARS]
+
+        if importance is None:
+            importance = getattr(text, "importance", None)
+        if importance is None:
+            importance = 0.6
+        importance = max(0.1, min(1.0, float(importance)))
+
+        if fact_type is None:
+            fact_type = getattr(text, "fact_type", None)
+        if fact_type is None:
+            fact_type = "factual"
+        fact_type = str(fact_type)
+
         kb = await self.ensure_kb()
         if kb is None:
             return False
@@ -869,6 +1031,8 @@ class MemoryManager:
                 "memory_created_at": ts,
                 "memory_updated_at": ts,
                 "user_id": owner,
+                "importance": round(importance, 2),
+                "type": fact_type,
             }
             try:
                 await kb.vec_db.insert(content=text, metadata=metadata)
@@ -939,24 +1103,36 @@ class MemoryManager:
                 return
 
             ttl_secs = self._ttl_days() * 86400.0
-            expired_ids = {
-                d["doc_id"]
-                for d in docs
-                if ttl_secs > 0
-                and d.get("updated_at")
-                and (now - d["updated_at"]) > ttl_secs
-            }
+            protect_important = self._protect_important()
+            expired_ids = set()
+            for d in docs:
+                if not d.get("updated_at"):
+                    continue
+                md = d.get("metadata") or {}
+                expires_at = md.get("expires_at")
+                if expires_at and now > float(expires_at):
+                    expired_ids.add(d["doc_id"])
+                    continue
+                if ttl_secs > 0 and (now - d["updated_at"]) > ttl_secs:
+                    importance = float(md.get("importance", 0.6) or 0.6)
+                    if protect_important and importance >= 0.85:
+                        continue
+                    expired_ids.add(d["doc_id"])
+
             if self._consolidate_enabled() and expired_ids:
                 expired_docs = [d for d in docs if d["doc_id"] in expired_ids]
                 await self._consolidate(owner, expired_docs)
             for doc_id in expired_ids:
                 await vec_db.delete(doc_id)
 
-            # LRU 上限：保留 updated_at 最新的 max_docs 条
+            # LRU 上限：保留 max_docs 条（高重要性优先保留）
             max_docs = self._max_docs()
             remaining = sorted(
                 [d for d in docs if d["doc_id"] not in expired_ids],
-                key=lambda d: d.get("updated_at") or 0,
+                key=lambda d: (
+                    float((d.get("metadata") or {}).get("importance", 0.6) or 0.6) >= 0.85,
+                    d.get("updated_at") or 0,
+                ),
                 reverse=True,
             )
             overflow = [d["doc_id"] for d in remaining[max_docs:]]
@@ -1063,7 +1239,7 @@ class MemoryManager:
             owner: 记忆归属键。
 
         Returns:
-            list[dict]: [{doc_id, text, updated_at}]。
+            list[dict]: [{doc_id, text, updated_at, metadata}]。
         """
         ds = vec_db.document_storage
         rows = await ds.get_documents(
@@ -1073,11 +1249,22 @@ class MemoryManager:
         )
         out = []
         for row in rows:
+            md = {}
+            if "metadata" in row:
+                raw_md = row.get("metadata")
+                if isinstance(raw_md, dict):
+                    md = raw_md
+                elif isinstance(raw_md, str):
+                    try:
+                        md = json.loads(raw_md)
+                    except Exception:
+                        md = {}
             out.append(
                 {
                     "doc_id": row["doc_id"],
                     "text": row["text"],
                     "updated_at": _parse_ts(row.get("updated_at")),
+                    "metadata": md,
                 }
             )
         return out
@@ -1140,7 +1327,11 @@ class MemoryManager:
         facts = self._parse_extraction(result)
         written = 0
         for fact in facts:
-            if await self.add_memory(owner, fact):
+            importance = getattr(fact, "importance", 0.6)
+            fact_type = getattr(fact, "fact_type", "factual")
+            if await self.add_memory(
+                owner, fact, importance=importance, fact_type=fact_type
+            ):
                 written += 1
         logger.info(
             f"[IsolatedMemory] 记忆抽取完成: 输入 {len(turns)} 轮对话, "
@@ -1214,10 +1405,13 @@ class MemoryManager:
         )
         parts.append(
             "# 输出协议\n"
-            "只输出一个合法 JSON 对象，结构必须严格为："
-            '{"memories":["记忆1","记忆2"]}。\n'
-            "memories 必须是字符串数组；没有符合标准的信息时输出 "
-            '{"memories":[]}。不要输出 Markdown 代码块、解释、注释或额外字段。'
+            "只输出一个合法 JSON 对象，结构必须严格为：\n"
+            '{"memories":[{"content":"记忆陈述句","importance":0.8,"type":"preference|factual|planned|episodic"}]}\n'
+            "字段说明：\n"
+            "- content: 记忆客观陈述句；\n"
+            "- importance: 重要度数值(0.1~1.0)。禁忌/核心个人信息/严重偏好给 0.8~0.95，常规偏好/事实给 0.6~0.75，临时约定/短期计划给 0.3~0.5；\n"
+            "- type: 事实类型。preference(偏好/禁忌), factual(稳定客观事实), planned(计划/约定), episodic(经历/发生过的事)。\n"
+            '没有符合标准的信息时输出 {"memories":[]}。不要输出 Markdown 代码块、解释、注释或额外字段。'
         )
         dialog = []
         for i, (user_text, reply_text) in enumerate(turns, 1):
@@ -1232,21 +1426,21 @@ class MemoryManager:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _parse_extraction(text: str) -> list[str]:
-        """解析抽取 LLM 的输出，兼容标准协议与常见非标准变体。
+    def _parse_extraction(text: str) -> list[ExtractedFact]:
+        """解析抽取 LLM 的输出，兼容新版结构化对象、旧版字符串数组与常见非标准变体。
 
         Args:
             text: LLM 返回文本。
 
         Returns:
-            list[str]: 抽取到的记忆文本列表。
+            list[ExtractedFact]: 抽取到的记忆单元列表（继承自 str，兼容字符串）。
         """
         text = (text or "").strip()
         if not text:
             return []
 
-        def clean_items(values: list[Any]) -> list[str]:
-            cleaned_items: list[str] = []
+        def clean_items(values: list[Any]) -> list[ExtractedFact]:
+            cleaned_items: list[ExtractedFact] = []
             seen: set[str] = set()
             empty_markers = {
                 "无", "没有", "无记忆", "暂无", "none", "null", "n/a",
@@ -1257,9 +1451,27 @@ class MemoryManager:
                 "no relevant", "no valid", "no useful",
             )
             for value in values:
-                if not isinstance(value, str):
+                importance = 0.6
+                fact_type = "factual"
+                if isinstance(value, dict):
+                    raw_text = None
+                    for key in ("content", "text", "memory", "fact", "value"):
+                        if key in value and isinstance(value[key], str):
+                            raw_text = value[key]
+                            break
+                    if raw_text is None:
+                        continue
+                    try:
+                        importance = float(value.get("importance", 0.6) or 0.6)
+                    except (ValueError, TypeError):
+                        importance = 0.6
+                    fact_type = str(value.get("type", "factual") or "factual")
+                elif isinstance(value, str):
+                    raw_text = value
+                else:
                     continue
-                item = re.sub(r"\s+", " ", value).strip()
+
+                item = re.sub(r"\s+", " ", raw_text).strip()
                 item = item.strip("` \t\r\n\"'“”‘’")
                 folded = item.casefold()
                 if (
@@ -1272,21 +1484,14 @@ class MemoryManager:
                 key = item.casefold()
                 if key not in seen:
                     seen.add(key)
-                    cleaned_items.append(item)
+                    cleaned_items.append(
+                        ExtractedFact(item, importance=importance, fact_type=fact_type)
+                    )
             return cleaned_items
 
         def payload_items(payload: Any) -> tuple[bool, list[Any]]:
             if isinstance(payload, list):
-                values: list[Any] = []
-                for item in payload:
-                    if isinstance(item, str):
-                        values.append(item)
-                    elif isinstance(item, dict):
-                        for key in ("content", "text", "memory", "fact", "value"):
-                            if key in item:
-                                values.append(item[key])
-                                break
-                return True, values
+                return True, payload
             if isinstance(payload, dict):
                 for key in ("memories", "memory", "facts", "items", "data", "result"):
                     if key in payload:
@@ -1296,7 +1501,7 @@ class MemoryManager:
                         return payload_items(value)
                 for key in ("content", "text", "fact", "value"):
                     if key in payload:
-                        return True, [payload[key]]
+                        return True, [payload]
             return False, []
 
         def decode_candidate(candidate: str) -> tuple[bool, list[str]]:
