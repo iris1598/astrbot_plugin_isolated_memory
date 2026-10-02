@@ -76,6 +76,22 @@ class TestStructuredExtraction(unittest.TestCase):
         self.assertTrue(isinstance(facts[0], str))
         self.assertEqual(facts[0].upper(), "用户对芒果和花生重度过敏")
 
+    def test_build_extract_prompt_livingmemory_style(self):
+        """测试借鉴 livingmemory 的提取提示词构造（时间绝对化、消歧、分级与原子化事实）。"""
+        mgr = make_manager()
+        prompt = mgr._build_extract_prompt(
+            turns=[("我明天要去上海出差", "好的，祝出差顺利！")],
+            persona="友好的智能管家",
+            user_name="小李",
+        )
+        self.assertIn("长期记忆提炼专家", prompt)
+        self.assertIn("小李", prompt)
+        self.assertIn("时间绝对化换算", prompt)
+        self.assertIn("主体自包含与消除代词", prompt)
+        self.assertIn("0.9 ~ 1.0 (核心重要)", prompt)
+        self.assertIn("宁缺毋滥", prompt)
+        self.assertIn('"memories":[{"content":', prompt)
+
     def test_backward_compatibility_with_string_array(self):
         """验证旧版纯字符串数组解析完全兼容，并赋默认值。"""
         payload = '{"memories": ["用户喜欢黑咖啡", "家里养了一只英短猫"]}'
@@ -212,7 +228,15 @@ class TestAgentToolsAndManualAdd(unittest.TestCase):
             conversation_manager = None
             persona_manager = None
 
-        self.plugin = Main(MockContext(), FakeConfig(memory_enabled=True))
+        self.plugin = Main(
+            MockContext(),
+            FakeConfig(
+                memory_enabled=True,
+                memory_agent_tools_enabled=True,
+                memory_tool_memorize_enabled=True,
+                memory_tool_recall_enabled=True,
+            ),
+        )
         self.plugin.memory = MockMemoryMgr()
         self.plugin._ensure_memory = lambda: asyncio.sleep(0, result=self.plugin.memory)
         self.plugin._group_gate = lambda event: {}
@@ -237,6 +261,70 @@ class TestAgentToolsAndManualAdd(unittest.TestCase):
             self.plugin.memory.added_records[0],
             ("test_user_umo", "用户叫李华，是一名高中生", 0.9, "factual"),
         )
+
+    def test_memorize_disabled_by_default(self):
+        """测试主动记忆录入关闭时拦截。"""
+        self.plugin.config = FakeConfig(
+            memory_enabled=True,
+            memory_agent_tools_enabled=True,
+            memory_tool_memorize_enabled=False,
+            memory_tool_recall_enabled=True,
+        )
+        class MockEvent:
+            unified_msg_origin = "test_user_umo"
+            message_obj = type("M", (), {"group_id": None})()
+
+        res = run(
+            self.plugin.memorize_user_memory(
+                MockEvent(),
+                content="用户叫李华，是一名高中生",
+            )
+        )
+        self.assertIn("主动记录记忆工具已被管理员禁用", res)
+
+    def test_all_agent_tools_disabled(self):
+        """测试 Agent 工具总开关关闭。"""
+        self.plugin.config = FakeConfig(
+            memory_enabled=True,
+            memory_agent_tools_enabled=False,
+        )
+        class MockEvent:
+            unified_msg_origin = "test_user_umo"
+            message_obj = type("M", (), {"group_id": None})()
+
+        res1 = run(self.plugin.memorize_user_memory(MockEvent(), content="测试"))
+        self.assertIn("Agent 记忆工具已被管理员禁用", res1)
+
+        res2 = run(self.plugin.recall_user_memory(MockEvent(), query="测试"))
+        self.assertIn("Agent 记忆工具已被管理员禁用", res2)
+
+    def test_sync_agent_tools_state(self):
+        """测试同步 AstrBot FuncTool 的 active 状态。"""
+        class MockFuncTool:
+            def __init__(self, name):
+                self.name = name
+                self.active = True
+
+        tool_recall = MockFuncTool("recall_user_memory")
+        tool_memorize = MockFuncTool("memorize_user_memory")
+
+        class MockToolManager:
+            func_list = [tool_recall, tool_memorize]
+
+        class MockContextWithTM:
+            def get_llm_tool_manager(self):
+                return MockToolManager()
+
+        self.plugin.context = MockContextWithTM()
+        self.plugin.config = FakeConfig(
+            memory_enabled=True,
+            memory_agent_tools_enabled=True,
+            memory_tool_recall_enabled=True,
+            memory_tool_memorize_enabled=False,
+        )
+        self.plugin._sync_agent_tools_state()
+        self.assertTrue(tool_recall.active)
+        self.assertFalse(tool_memorize.active)
 
     def test_recall_user_memory_tool(self):
         class MockEvent:

@@ -73,6 +73,9 @@ Agent 函数调用(Tool Calling)：
   - `memory_mmr_enabled`（默认 true）：MMR 多样性去重重排，避免召回内容语义重复。
   - `memory_protect_important`（默认 true）：保护重要度 $\ge 0.85$ 的核心记忆不被 TTL/LRU 淘汰。
   - `memory_context_expansion`（默认 true）：针对短用户提问（$\le 15$ 字），自动融合上一轮对话语境以提升检索召回率。
+  - `memory_agent_tools_enabled`（默认 true）：Agent 记忆函数调用工具总开关。
+  - `memory_tool_recall_enabled`（默认 true）：允许大模型主动调用 `recall_user_memory` 检索记忆。
+  - `memory_tool_memorize_enabled`（默认 false）：允许大模型主动调用 `memorize_user_memory` 写入记忆（默认关闭，保持克制，避免模型胡乱写入无长效价值的内容）。
   - `memory_extract_* / memory_half_life_days / memory_ttl_days / memory_inject_* / memory_fetch_k / memory_dup_threshold / memory_max_docs_per_user / memory_sweep_interval_minutes` 等衰减与容量参数。
 - `memory_reset_with_session`（默认 false）：**开启后 `/会话重置` 会同步清空
   该成员在当前群的记忆**（即旧插件的重置-清记忆联动）。

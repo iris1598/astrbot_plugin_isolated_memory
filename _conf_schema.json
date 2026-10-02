@@ -196,6 +196,24 @@
         "default": true,
         "hint": "用户输入 <=15 字符时，拼接上一轮助手的回复片段参与检索，避免短语脱靶"
       },
+      "memory_agent_tools_enabled": {
+        "type": "bool",
+        "description": "Agent 记忆函数调用工具总开关",
+        "default": true,
+        "hint": "开启后向 AstrBot 注册记忆工具供大模型主动调用；关闭后彻底禁用所有 Agent 记忆工具"
+      },
+      "memory_tool_recall_enabled": {
+        "type": "bool",
+        "description": "允许 Agent 主动检索记忆 (recall_user_memory)",
+        "default": true,
+        "hint": "供 Agent 在需要详细了解用户偏好或背景时主动发起记忆检索"
+      },
+      "memory_tool_memorize_enabled": {
+        "type": "bool",
+        "description": "允许 Agent 主动录入记忆 (memorize_user_memory)",
+        "default": false,
+        "hint": "供 Agent 在用户明确要求记住某事时主动写入长时记忆。默认关闭以保持克制，避免模型频繁写入琐碎信息（日常对话已由后台定时提取系统负责）"
+      },
       "memory_reset_with_session": {
         "type": "bool",
         "description": "/会话重置 时是否一并清空该用户记忆",

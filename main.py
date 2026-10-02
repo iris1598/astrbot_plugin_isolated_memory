@@ -106,6 +106,29 @@ class Main(Star):
         if reason:
             self._init_reason = reason
             logger.info(f"[IsolatedMemory] 记忆系统未启用: {reason}")
+        self._sync_agent_tools_state()
+
+    def _sync_agent_tools_state(self) -> None:
+        """根据配置同步 AstrBot 内部 FuncTool 的 active 状态。
+        当工具 active=False 时，AstrBot 在构造 LLM 请求时会自动过滤该工具，不把工具暴露给模型。
+        """
+        try:
+            if not hasattr(self.context, "get_llm_tool_manager"):
+                return
+            tmgr = self.context.get_llm_tool_manager()
+            if not tmgr or not hasattr(tmgr, "func_list"):
+                return
+            master_on = bool(self._mcfg("memory_agent_tools_enabled", True))
+            recall_on = master_on and bool(self._mcfg("memory_tool_recall_enabled", True))
+            memorize_on = master_on and bool(self._mcfg("memory_tool_memorize_enabled", False))
+            for f in getattr(tmgr, "func_list", []):
+                name = getattr(f, "name", None)
+                if name == "recall_user_memory":
+                    f.active = recall_on
+                elif name == "memorize_user_memory":
+                    f.active = memorize_on
+        except Exception as exc:
+            logger.debug(f"[IsolatedMemory] 同步 Agent 工具 active 状态失败: {exc}")
 
     async def _ensure_memory(self) -> MemoryManager | None:
         """返回可用的 MemoryManager；初始化未成功时按 15 秒节流自动重试，
@@ -133,6 +156,7 @@ class Main(Star):
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
         """LLM 请求前：召回衰减记忆并注入为临时内容块。"""
+        self._sync_agent_tools_state()
         if await self._ensure_memory() is None:
             return
         group_cfg = self._group_gate(event)
@@ -852,6 +876,10 @@ class Main(Star):
             importance(number): 重要性程度（0.1至1.0），默认0.8。偏好/禁忌/生理信息给0.8~0.95，常规偏好/事实给0.6~0.75，临时约定给0.3~0.5
             fact_type(string): 事实类型，可选值: preference(偏好/禁忌), factual(稳定事实), planned(约定/计划), episodic(经历)
         """
+        if not self._mcfg("memory_agent_tools_enabled", True):
+            return "Agent 记忆工具已被管理员禁用。"
+        if not self._mcfg("memory_tool_memorize_enabled", False):
+            return "主动记录记忆工具已被管理员禁用。"
         if await self._ensure_memory() is None:
             return "记忆系统未启用。"
         owner = event.unified_msg_origin
@@ -888,6 +916,10 @@ class Main(Star):
         Args:
             query(string): 检索查询词或问题描述（例如“喜欢的饮料”、“过敏食物”、“生日”）
         """
+        if not self._mcfg("memory_agent_tools_enabled", True):
+            return "Agent 记忆工具已被管理员禁用。"
+        if not self._mcfg("memory_tool_recall_enabled", True):
+            return "主动检索记忆工具已被管理员禁用。"
         if await self._ensure_memory() is None:
             return "记忆系统未启用。"
         owner = event.unified_msg_origin
