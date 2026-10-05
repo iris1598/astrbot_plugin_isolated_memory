@@ -456,6 +456,77 @@ def _parse_ts(value: Any) -> float | None:
     return None
 
 
+def _detect_query_intent(query: str) -> dict:
+    """分析用户查询的意图倾向与类型偏置（参考 livingmemory 动态加权机制）。
+
+    Args:
+        query: 用户查询文本。
+
+    Returns:
+        dict: 包含意图标识、三因子权重元组 (w_rel, w_imp, w_rec)、偏好类型集合与类型增益分。
+    """
+    q = (query or "").lower().strip()
+
+    # 偏好 / 禁忌 / 习惯意图
+    pref_terms = (
+        "喜欢", "爱吃", "爱喝", "爱看", "爱听", "爱玩", "讨厌", "反感", "厌恶",
+        "忌口", "过敏", "偏好", "口味", "习惯", "奶茶", "饮料", "不吃", "不喝",
+        "最爱", "喜好", "嗜好",
+    )
+    # 核心资料 / 个人身份意图
+    profile_terms = (
+        "是谁", "叫什么", "名字", "姓名", "生日", "多大", "几岁", "年龄",
+        "职业", "工作", "专业", "家住", "哪人", "住在", "电话", "手机",
+        "家人", "宠物", "老婆", "老公", "儿子", "女儿", "父母", "身份",
+    )
+    # 计划 / 约定 / 待办日程意图
+    plan_terms = (
+        "计划", "打算", "准备", "待办", "下周", "明天", "后天", "周末",
+        "约定", "安排", "日程", "提醒", "考试", "几号", "行程", "出发",
+        "何时", "什么时候去",
+    )
+    # 近期动态 / 往事回忆意图
+    recency_terms = (
+        "最近", "刚才", "昨天", "前天", "刚刚", "前几天", "上周", "上次",
+        "之前说", "那会儿", "刚聊", "谈到", "上一轮",
+    )
+
+    if any(k in q for k in pref_terms):
+        return {
+            "intent": "preference",
+            "weights": (0.55, 0.35, 0.10),
+            "preferred_types": {"preference"},
+            "type_boost": 0.15,
+        }
+    if any(k in q for k in profile_terms):
+        return {
+            "intent": "profile",
+            "weights": (0.55, 0.35, 0.10),
+            "preferred_types": {"factual"},
+            "type_boost": 0.12,
+        }
+    if any(k in q for k in plan_terms):
+        return {
+            "intent": "planned",
+            "weights": (0.50, 0.25, 0.25),
+            "preferred_types": {"planned"},
+            "type_boost": 0.15,
+        }
+    if any(k in q for k in recency_terms):
+        return {
+            "intent": "recency",
+            "weights": (0.45, 0.15, 0.40),
+            "preferred_types": {"episodic", "factual"},
+            "type_boost": 0.10,
+        }
+    return {
+        "intent": "general",
+        "weights": (0.50, 0.20, 0.30),
+        "preferred_types": set(),
+        "type_boost": 0.0,
+    }
+
+
 class MemoryManager:
     """基于共享知识库的随时间衰减记忆管理器。"""
 
@@ -546,6 +617,36 @@ class MemoryManager:
 
     def _protect_important(self) -> bool:
         return bool(self._cfg("memory_protect_important", True))
+
+    def _rerank_enabled(self) -> bool:
+        return bool(self._cfg("memory_rerank_enabled", False))
+
+    def _rerank_provider_id(self) -> str:
+        return str(self._cfg("memory_rerank_provider_id", "") or "").strip()
+
+    def _get_rerank_provider(self) -> Any:
+        """解析并返回可用的 RerankProvider 实例（适配 AstrBot 原生 Provider 架构）。"""
+        if not self._rerank_enabled():
+            return None
+        pid = self._rerank_provider_id()
+        try:
+            if pid and hasattr(self.context, "get_provider_by_id"):
+                p = self.context.get_provider_by_id(pid)
+                if p and hasattr(p, "rerank"):
+                    return p
+            pm = getattr(self.context, "provider_manager", None)
+            if pm:
+                insts = getattr(pm, "rerank_provider_insts", [])
+                if insts:
+                    return insts[0]
+                inst_map = getattr(pm, "inst_map", {})
+                if isinstance(inst_map, dict):
+                    for p in inst_map.values():
+                        if hasattr(p, "rerank"):
+                            return p
+        except Exception as exc:
+            logger.debug(f"[IsolatedMemory] 解析 Rerank Provider 异常: {exc}")
+        return None
 
     # ── 知识库解析 ─────────────────────────────────────────────
 
@@ -654,7 +755,12 @@ class MemoryManager:
             vec_db = kb.vec_db
             # 池大小不变量：FAISS 稠密池必须覆盖该用户全部记忆（LRU 上限保证）
             fetch_pool = max(self._fetch_k(), self._max_docs() + 20)
-            oversample = max(top_k * 3, 5)
+            oversample = max(
+                top_k * 3,
+                int(self._cfg("memory_rerank_candidates", 15) or 15)
+                if self._rerank_enabled()
+                else 5,
+            )
 
             dense = await vec_db.retrieve(
                 query=query,
@@ -675,6 +781,41 @@ class MemoryManager:
         protect_important = self._protect_important()
 
         max_fused = max((t[1] for t in fused), default=1.0) or 1.0
+
+        # 查询意图分析与动态因子加权
+        intent_info = _detect_query_intent(query)
+        w_rel, w_imp, w_rec = intent_info["weights"]
+
+        # 可选 Rerank 跨编码器神经重排序
+        rerank_provider = self._get_rerank_provider()
+        rerank_map: dict[str, float] = {}
+        if rerank_provider and fused:
+            rerank_candidates_n = max(
+                2, min(50, int(self._cfg("memory_rerank_candidates", 15) or 15))
+            )
+            top_fused = fused[:rerank_candidates_n]
+            docs_text = [item[2] for item in top_fused]
+            timeout = float(self._cfg("memory_rerank_timeout", 8.0) or 8.0)
+            try:
+                rerank_res = await asyncio.wait_for(
+                    rerank_provider.rerank(query=query, documents=docs_text),
+                    timeout=timeout,
+                )
+                if rerank_res:
+                    scores = [float(r.relevance_score) for r in rerank_res]
+                    min_s, max_s = min(scores), max(scores)
+                    diff = max_s - min_s
+                    for r in rerank_res:
+                        if 0 <= r.index < len(top_fused):
+                            d_id = top_fused[r.index][0]
+                            norm_s = (
+                                (float(r.relevance_score) - min_s) / diff
+                                if diff > 0
+                                else 1.0
+                            )
+                            rerank_map[d_id] = norm_s
+            except Exception as e:
+                logger.warning(f"[IsolatedMemory] Rerank 重排序失败，已降级为 RRF: {e}")
 
         hits: list[dict] = []
         for item in fused:
@@ -700,10 +841,20 @@ class MemoryManager:
                 if not (protect_important and importance >= 0.85):
                     continue
 
-            # 加权打分模型（结合相关度、重要度与时间衰减）
-            relevance = fscore / max_fused
+            # 基础相关度（优先取 Rerank 重排分，否则取 RRF 融合分）
+            if doc_id in rerank_map:
+                base_relevance = rerank_map[doc_id]
+            else:
+                base_relevance = fscore / max_fused
+
+            # 事实类型意图定向加成 (Fact-Type Boost)
+            if fact_type in intent_info["preferred_types"]:
+                relevance = min(1.0, base_relevance + intent_info["type_boost"])
+            else:
+                relevance = base_relevance
+
             recency = 0.5 ** (age_days / half_life)
-            effective = 0.50 * relevance + 0.20 * importance + 0.30 * recency
+            effective = w_rel * relevance + w_imp * importance + w_rec * recency
 
             if effective < min_score:
                 continue
@@ -717,6 +868,7 @@ class MemoryManager:
                     "effective": round(float(effective), 6),
                     "importance": round(importance, 2),
                     "type": fact_type,
+                    "intent": intent_info["intent"],
                 }
             )
 
@@ -1578,7 +1730,7 @@ class MemoryManager:
     # ── 注入文本格式化 ─────────────────────────────────────────
 
     def format_injection(self, hits: list[dict]) -> str:
-        """格式化注入文本（含时效标注）。
+        """格式化注入文本（含分类标注与防冲突防幻觉准则，参考 livingmemory 注入协议）。
 
         Args:
             hits: recall() 返回的记忆列表。
@@ -1586,19 +1738,45 @@ class MemoryManager:
         Returns:
             str: 注入的用户消息内容块。
         """
-        lines = ["[User Memory]（按相关度与时效衰减排序，仅供参考）:"]
+        if not hits:
+            return ""
+
+        type_labels = {
+            "preference": "用户偏好/禁忌",
+            "factual": "用户个人资料",
+            "planned": "既定计划/日程",
+            "episodic": "过往经历/事实",
+        }
+        mem_lines = []
         for hit in hits:
             text = (hit.get("text") or "").strip()
             if not text:
                 continue
             age = float(hit.get("age_days") or 0.0)
             label = "今天" if age < 1 else f"约{int(age)}天前"
-            lines.append(f"- {text}（{label}）")
-        result = "\n".join(lines)
+            fact_type = str(hit.get("type", "factual") or "factual")
+            t_label = type_labels.get(fact_type, "用户资料")
+            mem_lines.append(f"- [{t_label}] {text}（{label}）")
+
+        if not mem_lines:
+            return ""
+
+        body = "\n".join(mem_lines)
         cap = self._inject_max_chars()
-        if len(result) > cap:
-            result = result[:cap].rstrip() + "…"
-        return result
+
+        prompt_block = (
+            "--- BEGIN USER BACKGROUND MEMORY ---\n"
+            "【历史记忆参考】以下为过去对话中沉淀的用户背景信息，仅供对话理解与个性化参考：\n"
+            f"{body}\n\n"
+            "【防幻觉与冲突准则】：\n"
+            "1. 以上均为过往事实背景，并非当前正在发生的新事件。\n"
+            "2. 若上述历史记忆与用户「当前最新发言」存在矛盾或变更，必须无条件以用户当前的最新表述为准。\n"
+            "3. 请自然融入对话，切勿生硬复读记忆原文或反客为主。\n"
+            "--- END USER BACKGROUND MEMORY ---"
+        )
+        if len(prompt_block) > cap:
+            prompt_block = prompt_block[:cap].rstrip() + "…"
+        return prompt_block
 
     # ── MBTI 测评报告（娱乐向推测）─────────────────────────────
     #

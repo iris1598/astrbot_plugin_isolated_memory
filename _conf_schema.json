@@ -214,6 +214,25 @@
         "default": false,
         "hint": "供 Agent 在用户明确要求记住某事时主动写入长时记忆。默认关闭以保持克制，避免模型频繁写入琐碎信息（日常对话已由后台定时提取系统负责）"
       },
+      "memory_rerank_enabled": {
+        "type": "bool",
+        "description": "是否启用 Rerank 神经重排序（可选）",
+        "default": false,
+        "hint": "开启后在双路初筛后，调用 AstrBot 的 Rerank 跨编码器模型精排，大幅提升长难句与复杂语境检索精度。未配置或异常时自动无感降级"
+      },
+      "memory_rerank_provider_id": {
+        "type": "string",
+        "description": "Rerank 专用提供商 ID（可选）",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空时自动检测并使用 AstrBot 中首个已激活的 Rerank 实例；亦可手动指定"
+      },
+      "memory_rerank_candidates": {
+        "type": "int",
+        "description": "送入 Rerank 重排序的候选数量",
+        "default": 15,
+        "hint": "双路检索挑出该数量的候选送交 Rerank 模型精排，建议 10~25"
+      },
       "memory_reset_with_session": {
         "type": "bool",
         "description": "/会话重置 时是否一并清空该用户记忆",

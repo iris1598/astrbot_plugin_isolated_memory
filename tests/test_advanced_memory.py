@@ -16,14 +16,19 @@ _HAS = bootstrap.bootstrap()
 
 if _HAS:
     try:
-        from astrbot_plugin_isolated_memory.memory import ExtractedFact, MemoryManager
+        from astrbot_plugin_isolated_memory.memory import (
+            ExtractedFact,
+            MemoryManager,
+            _detect_query_intent,
+        )
         from astrbot_plugin_isolated_memory.main import Main
     except ImportError:
-        from memory import ExtractedFact, MemoryManager
+        from memory import ExtractedFact, MemoryManager, _detect_query_intent
         from main import Main
 else:
     ExtractedFact = None
     MemoryManager = None
+    _detect_query_intent = None
     Main = None
 
 
@@ -357,6 +362,170 @@ class TestAgentToolsAndManualAdd(unittest.TestCase):
         self.assertEqual(len(self.plugin.memory.added_records), 1)
         self.assertEqual(self.plugin.memory.added_records[0][1], "我最喜欢的运动是羽毛球")
         self.assertEqual(self.plugin.memory.added_records[0][2], 0.9)
+
+
+@unittest.skipUnless(_HAS, "需要含 astrbot 的 Python 环境")
+class TestRecallOptimizations(unittest.TestCase):
+    """测试召回优化（意图动态加权、类型定向加成、Rerank 模型支持、防幻觉注入协议）。"""
+
+    def test_detect_query_intent(self):
+        # 偏好意图
+        p_res = _detect_query_intent("你记得我平时最爱喝什么饮料吗？")
+        self.assertEqual(p_res["intent"], "preference")
+        self.assertIn("preference", p_res["preferred_types"])
+        self.assertGreater(p_res["weights"][1], 0.3)
+
+        # 个人资料意图
+        prof_res = _detect_query_intent("我叫什么名字？家住在哪里？")
+        self.assertEqual(prof_res["intent"], "profile")
+        self.assertIn("factual", prof_res["preferred_types"])
+
+        # 计划意图
+        plan_res = _detect_query_intent("下周有什么考试安排？")
+        self.assertEqual(plan_res["intent"], "planned")
+        self.assertIn("planned", plan_res["preferred_types"])
+
+        # 近期意图
+        rec_res = _detect_query_intent("昨天咱们聊了什么内容？")
+        self.assertEqual(rec_res["intent"], "recency")
+        self.assertGreaterEqual(rec_res["weights"][2], 0.4)
+
+        # 常规意图
+        gen_res = _detect_query_intent("今天外面太阳挺大的")
+        self.assertEqual(gen_res["intent"], "general")
+
+    def test_fact_type_boost_in_recall(self):
+        """测试类型定向加成：当意图匹配对应类型时获得加权。"""
+        now = time.time()
+        docs = [
+            {
+                "doc_id": "pref_doc",
+                "similarity": 0.85,
+                "data": {
+                    "doc_id": "pref_doc",
+                    "text": "用户偏好喝无糖乌龙茶",
+                    "updated_at": now - 30 * 86400,
+                    "metadata": json.dumps({"importance": 0.8, "type": "preference"}),
+                },
+            },
+            {
+                "doc_id": "episodic_doc",
+                "similarity": 0.85,
+                "data": {
+                    "doc_id": "episodic_doc",
+                    "text": "用户昨天喝了一杯西瓜汁",
+                    "updated_at": now - 30 * 86400,
+                    "metadata": json.dumps({"importance": 0.8, "type": "episodic"}),
+                },
+            },
+        ]
+
+        class MockVecDB:
+            async def retrieve(self, query, k, fetch_k, metadata_filters):
+                return [
+                    type("Res", (), {"similarity": d["similarity"], "data": d["data"]})()
+                    for d in docs
+                ]
+
+            document_storage = type(
+                "DS",
+                (),
+                {
+                    "stopwords": set(),
+                    "search_sparse": staticmethod(lambda tokens, limit: asyncio.sleep(0, result=[])),
+                    "update_document_by_doc_id": staticmethod(lambda doc_id, text: asyncio.sleep(0)),
+                },
+            )()
+
+        class MockKB:
+            vec_db = MockVecDB()
+            kb = type("K", (), {"kb_id": "test_kb", "kb_name": "test_kb", "embedding_provider_id": "ep"})()
+            init_error = None
+
+        mgr = make_manager(memory_half_life_days=14, memory_min_score=0.0)
+        mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+
+        hits = run(mgr.recall("owner", "我最喜欢喝什么饮料？"))
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(hits[0]["doc_id"], "pref_doc")
+        self.assertGreater(hits[0]["effective"], hits[1]["effective"])
+
+    def test_rerank_integration_and_fallback(self):
+        """测试 Rerank 模型调用及异常自动回退。"""
+        now = time.time()
+        docs = [
+            {
+                "doc_id": "doc1",
+                "similarity": 0.90,
+                "data": {"doc_id": "doc1", "text": "用户喜欢吃面条", "updated_at": now, "metadata": "{}"},
+            },
+            {
+                "doc_id": "doc2",
+                "similarity": 0.80,
+                "data": {"doc_id": "doc2", "text": "用户讨厌吃香菜", "updated_at": now, "metadata": "{}"},
+            },
+        ]
+
+        class MockVecDB:
+            async def retrieve(self, query, k, fetch_k, metadata_filters):
+                return [
+                    type("Res", (), {"similarity": d["similarity"], "data": d["data"]})()
+                    for d in docs
+                ]
+
+            document_storage = type(
+                "DS",
+                (),
+                {
+                    "stopwords": set(),
+                    "search_sparse": staticmethod(lambda tokens, limit: asyncio.sleep(0, result=[])),
+                    "update_document_by_doc_id": staticmethod(lambda doc_id, text: asyncio.sleep(0)),
+                },
+            )()
+
+        class MockKB:
+            vec_db = MockVecDB()
+            kb = type("K", (), {"kb_id": "test_kb", "kb_name": "test_kb", "embedding_provider_id": "ep"})()
+            init_error = None
+
+        class MockRerankProvider:
+            async def rerank(self, query, documents, top_n=None):
+                return [
+                    type("RR", (), {"index": 1, "relevance_score": 0.99})(),
+                    type("RR", (), {"index": 0, "relevance_score": 0.10})(),
+                ]
+
+        mgr = make_manager(memory_rerank_enabled=True, memory_min_score=0.0)
+        mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+        mgr._get_rerank_provider = lambda: MockRerankProvider()
+
+        hits = run(mgr.recall("owner", "测试查询"))
+        self.assertEqual(hits[0]["doc_id"], "doc2")
+
+        class FailingRerankProvider:
+            async def rerank(self, query, documents, top_n=None):
+                raise RuntimeError("API timeout")
+
+        mgr._get_rerank_provider = lambda: FailingRerankProvider()
+        fallback_hits = run(mgr.recall("owner", "测试查询"))
+        self.assertEqual(len(fallback_hits), 2)
+        self.assertEqual(fallback_hits[0]["doc_id"], "doc1")
+
+    def test_format_injection_anti_hallucination_protocol(self):
+        """测试防幻觉与冲突抑制注入格式。"""
+        mgr = make_manager(memory_inject_max_chars=1000)
+        hits = [
+            {"text": "用户喜欢喝美式", "age_days": 0.5, "type": "preference"},
+            {"text": "下周五去北京参加学术会议", "age_days": 2.0, "type": "planned"},
+        ]
+        formatted = mgr.format_injection(hits)
+        self.assertIn("--- BEGIN USER BACKGROUND MEMORY ---", formatted)
+        self.assertIn("【历史记忆参考】", formatted)
+        self.assertIn("- [用户偏好/禁忌] 用户喜欢喝美式（今天）", formatted)
+        self.assertIn("- [既定计划/日程] 下周五去北京参加学术会议（约2天前）", formatted)
+        self.assertIn("【防幻觉与冲突准则】：", formatted)
+        self.assertIn("必须无条件以用户当前的最新表述为准", formatted)
+        self.assertIn("--- END USER BACKGROUND MEMORY ---", formatted)
 
 
 if __name__ == "__main__":

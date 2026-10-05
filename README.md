@@ -47,12 +47,16 @@ AstrBot 官方对话体系（`ConversationManager`）与
 
 ```
 on_llm_request：捕获人设 → 短查询上下文感知扩展(可选)
-  → 混合检索(稠密+BM25+RRF, 严格按 memory_owner 隔离过滤)
+  → 查询意图动态识别（偏好/人设档案/未来日程/近期回顾/通用）
+  → 混合检索(稠密向量+BM25+RRF, 严格按 memory_owner 隔离过滤)
+  → Cross-Encoder 精排重打分（可选对接 AstrBot 原生 RerankProvider，异常自动无缝降级）
+  → 意图定向加权与事实类型定向 Boost（如询问喜好时 preference 记忆权重定向 +0.15）
   → MMR 最大边际相关度多样性重排(防止相近语义挤占 top-k)
-  → 多因子加权评分：有效分 = 0.50×相关度 + 0.20×重要度 + 0.30×0.5^(天数/半衰期)
-  → 提取 top_k 临时注入 prompt（不入会话历史）
+  → 多因子动态评分：有效分 = w_rel×相关度 + w_imp×重要度 + w_rec×0.5^(天数/半衰期)
+  → 防幻觉与时效冲突护轨结构化注入（带相对时间锚点 [今天/约X天前]，按偏好/档案/计划/经历分类，当前陈述优先）
   → 被注入记忆刷新时间戳（回忆强化）；惰性清扫（高重要性保护 + TTL + LRU）
 on_llm_response：每 memory_extract_interval 轮异步抽取结构化事实
+  → 借鉴 livingmemory 的原子化事实沉淀提示词与时间上下文锚定
   → 提取 content + importance(0.1~1.0) + fact_type(偏好/事实/计划/经历)
   → 去重写入共享知识库（100% 向后兼容旧格式）
 Agent 函数调用(Tool Calling)：
@@ -62,6 +66,9 @@ Agent 函数调用(Tool Calling)：
 
 - **全量向后兼容**：旧版本或旧插件迁移的纯文本 Chunk 无需任何数据库迁移，读取时自动回落为默认重要度（0.6）与通用类型，统一参与评分与召回。
 - **高重要性永久保护**：重要度 $\ge 0.85$ 的核心记忆（如姓名、忌口、家庭、重要关系）受保护，不会因时间流逝被 TTL 清扫或 LRU 淘汰。
+- **动态意图权重与类型定向加权**：根据用户输入意图动态分配相关度/重要度/时间衰减三维权重（如询问“我之前提过想去哪”自动调高时间权重，询问偏好自动锁定 `preference` 类型记忆并给予定向 Boost）。
+- **原生 Rerank 模型精排支持**：支持对接 AstrBot 原生配置的 Cross-Encoder Rerank 提供商，在召回候选集中实现深度语义重排序；网络波动或超时自动平滑降级为 RRF 倒数排名融合。
+- **防幻觉与冲突抑制护轨注入**：注入 Prompt 采用分类聚合结构（`[用户偏好/禁忌]`、`[用户个人资料]`、`[既定计划/日程]`、`[过往经历/事实]`）并标注相对时间戳（如“约3天前”），同时附带防幻觉系统指示，明确当记忆与当前对话冲突时以当前最新陈述为准。
 - **纯独立单人隔离**：不依赖任何复杂的跨人关系图谱与图数据库，完全基于 `unique_session` UMO 维度严格隔离，杜绝跨用户串记忆与隐私泄漏风险。
 
 ## 配置
@@ -73,6 +80,9 @@ Agent 函数调用(Tool Calling)：
   - `memory_mmr_enabled`（默认 true）：MMR 多样性去重重排，避免召回内容语义重复。
   - `memory_protect_important`（默认 true）：保护重要度 $\ge 0.85$ 的核心记忆不被 TTL/LRU 淘汰。
   - `memory_context_expansion`（默认 true）：针对短用户提问（$\le 15$ 字），自动融合上一轮对话语境以提升检索召回率。
+  - `memory_rerank_enabled`（默认 false）：启用 Cross-Encoder Rerank 模型精排重排序。
+  - `memory_rerank_provider_id`（默认空）：选择 AstrBot 中配置的 Rerank 模型 Provider ID（留空默认选择首个可用）。
+  - `memory_rerank_candidates`（默认 15）：送入 Rerank 模型精排打分的初筛候选条数。
   - `memory_agent_tools_enabled`（默认 true）：Agent 记忆函数调用工具总开关。
   - `memory_tool_recall_enabled`（默认 true）：允许大模型主动调用 `recall_user_memory` 检索记忆。
   - `memory_tool_memorize_enabled`（默认 false）：允许大模型主动调用 `memorize_user_memory` 写入记忆（默认关闭，保持克制，避免模型胡乱写入无长效价值的内容）。
