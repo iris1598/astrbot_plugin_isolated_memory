@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -528,5 +530,520 @@ class TestRecallOptimizations(unittest.TestCase):
         self.assertIn("--- END USER BACKGROUND MEMORY ---", formatted)
 
 
+@unittest.skipUnless(_HAS, "需要含 astrbot 的 Python 环境")
+class TestMemoryUpgrade(unittest.TestCase):
+    """测试存量历史记忆全量原子化重构与属性升级。"""
+
+    def test_build_upgrade_prompt(self):
+        mgr = make_manager()
+        docs = [
+            {"text": "用户喜欢吃辣"},
+            {"text": "用户目前在杭州做前端开发"},
+        ]
+        prompt = mgr._build_upgrade_prompt(docs, user_name="测试者")
+        self.assertIn("测试者", prompt)
+        self.assertIn("<raw_memories>", prompt)
+        self.assertIn("1. 用户喜欢吃辣", prompt)
+        self.assertIn("2. 用户目前在杭州做前端开发", prompt)
+        self.assertIn("preference", prompt)
+        self.assertIn("factual", prompt)
+        self.assertIn("planned", prompt)
+        self.assertIn("episodic", prompt)
+
+    def test_upgrade_memories_success(self):
+        mgr = make_manager()
+        deleted_owners = []
+        inserted_items = []
+
+        class MockVecDB:
+            async def delete_documents(self, metadata_filters=None):
+                if metadata_filters and "memory_owner" in metadata_filters:
+                    deleted_owners.append(metadata_filters["memory_owner"])
+
+            async def insert(self, content, metadata=None):
+                inserted_items.append((content, metadata))
+
+            async def count_documents(self, metadata_filter=None):
+                return len(inserted_items)
+
+        class MockKB:
+            vec_db = MockVecDB()
+
+            class kb:
+                kb_id = "test_kb_id"
+
+        async def fake_ensure_kb():
+            return MockKB()
+
+        async def fake_all_chunks(vec_db, owner):
+            return [
+                {"text": "用户特别喜欢喝无糖乌龙茶"},
+                {"text": "用户在上海做后端开发，主要用Python"},
+            ]
+
+        async def fake_llm_chat(prompt, provider_id=None, timeout=None, umo=""):
+            return (
+                '[\n'
+                '  {"content": "用户偏好饮用无糖乌龙茶", "importance": 0.75, "fact_type": "preference"},\n'
+                '  {"content": "用户在上海从事后端开发，主力语言为Python", "importance": 0.90, "fact_type": "factual"}\n'
+                ']'
+            )
+
+        mgr.ensure_kb = fake_ensure_kb
+        mgr._all_owner_chunks = fake_all_chunks
+        mgr._llm_chat = fake_llm_chat
+        mgr._ensure_mem_doc = lambda kb, owner: asyncio.sleep(0, result="mem_doc_1")
+        mgr._refresh_stats = lambda kb: asyncio.sleep(0)
+        mgr._sync_mem_doc = lambda kb, owner: asyncio.sleep(0)
+
+        res = run(mgr.upgrade_memories("test_owner", user_name="小明"))
+        self.assertTrue(res["success"])
+        self.assertEqual(res["before_count"], 2)
+        self.assertEqual(res["after_count"], 2)
+        self.assertEqual(res["type_counts"]["preference"], 1)
+        self.assertEqual(res["type_counts"]["factual"], 1)
+        self.assertEqual(res["protected_count"], 1)  # 0.90 >= 0.85
+        self.assertIn("test_owner", deleted_owners)
+        self.assertEqual(len(inserted_items), 2)
+        self.assertEqual(inserted_items[1][1]["importance"], 0.90)
+        self.assertEqual(inserted_items[1][1]["type"], "factual")
+
+    def test_upgrade_memories_empty(self):
+        mgr = make_manager()
+
+        class MockKB:
+            vec_db = None
+
+        mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+        mgr._all_owner_chunks = lambda vec_db, owner: asyncio.sleep(0, result=[])
+
+        res = run(mgr.upgrade_memories("empty_owner"))
+        self.assertTrue(res["success"])
+        self.assertEqual(res["before_count"], 0)
+        self.assertEqual(res["after_count"], 0)
+
+    def test_upgrade_memories_llm_failure_safety(self):
+        mgr = make_manager()
+        deleted_owners = []
+
+        class MockVecDB:
+            async def delete_documents(self, metadata_filters=None):
+                deleted_owners.append(metadata_filters)
+
+        class MockKB:
+            vec_db = MockVecDB()
+
+        mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+        mgr._all_owner_chunks = lambda vec_db, owner: asyncio.sleep(
+            0, result=[{"text": "重要记忆"}]
+        )
+        mgr._llm_chat = lambda prompt, provider_id=None, timeout=None, umo="": asyncio.sleep(
+            0, result=""
+        )
+
+        res = run(mgr.upgrade_memories("fail_owner"))
+        self.assertFalse(res["success"])
+        self.assertEqual(len(deleted_owners), 0)  # 原有记忆安全保留，未删除
+
+    def test_cmd_memory_upgrade_dispatch(self):
+        class MockMemoryMgr:
+            async def upgrade_memories(self, owner, user_name="", umo=""):
+                return {
+                    "success": True,
+                    "message": "记忆升级成功",
+                    "before_count": 3,
+                    "after_count": 2,
+                    "type_counts": {"preference": 1, "factual": 1},
+                    "protected_count": 1,
+                    "sample_facts": ["[preference] 喜好", "[factual] 资料"],
+                }
+
+        class MockContext:
+            conversation_manager = None
+            persona_manager = None
+
+        plugin = Main(MockContext(), FakeConfig(memory_enabled=True))
+        plugin.memory = MockMemoryMgr()
+        plugin._ensure_memory = lambda: asyncio.sleep(0, result=plugin.memory)
+        plugin._group_gate = lambda event: {}
+        plugin._gate_block_reason = lambda event: None
+
+        class FakeEvent:
+            unified_msg_origin = "test_umo"
+
+            def get_sender_name(self):
+                return "测试用户"
+
+            def plain_result(self, text):
+                return text
+
+        async def _test():
+            results = []
+            async for r in plugin.cmd_memory_upgrade(FakeEvent()):
+                results.append(r)
+            return results
+
+        results = run(_test())
+        self.assertTrue(any("记忆结构化升级完成" in r for r in results))
+        self.assertTrue(any("原始记忆: 3 条" in r for r in results))
+        self.assertTrue(any("重构后原子记忆: 2 条" in r for r in results))
+
+
+@unittest.skipUnless(_HAS, "需要含 astrbot 的 Python 环境")
+class TestAdminBackupAndBatchUpgrade(unittest.TestCase):
+    """测试管理员记忆全量备份与全员一键升级。"""
+
+    def test_backup_all_memories_and_list(self):
+        import tempfile
+        import shutil
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            mgr = make_manager()
+
+            class MockKB:
+                class kb:
+                    kb_id = "kb_backup_test"
+                    kb_name = "测试库"
+                vec_db = None
+
+            mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+            mgr.get_all_memory_owners = lambda: asyncio.sleep(0, result=["user_a", "user_b"])
+
+            async def fake_all_chunks(vec_db, owner):
+                if owner == "user_a":
+                    return [{"text": "记忆A1", "updated_at": 100, "metadata": {}}]
+                return [
+                    {"text": "记忆B1", "updated_at": 100, "metadata": {}},
+                    {"text": "记忆B2", "updated_at": 105, "metadata": {}},
+                ]
+
+            mgr._all_owner_chunks = fake_all_chunks
+
+            res = run(mgr.backup_all_memories(backup_dir=tmpdir))
+            self.assertTrue(res["success"])
+            self.assertEqual(res["owners_count"], 2)
+            self.assertEqual(res["total_chunks"], 3)
+            self.assertTrue(os.path.exists(res["file_path"]))
+
+            with open(res["file_path"], "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["total_owners"], 2)
+            self.assertEqual(data["total_chunks"], 3)
+            self.assertIn("user_a", data["memories"])
+            self.assertIn("user_b", data["memories"])
+
+            backups = mgr.list_backups(backup_dir=tmpdir)
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0]["file_name"], res["file_name"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_upgrade_all_memories(self):
+        mgr = make_manager()
+
+        class MockKB:
+            vec_db = None
+
+        mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+        mgr.backup_all_memories = lambda: asyncio.sleep(
+            0, result={"success": True, "file_name": "auto_backup.json"}
+        )
+        mgr.get_all_memory_owners = lambda: asyncio.sleep(0, result=["user_1", "user_2"])
+        mgr._all_owner_chunks = lambda vec_db, owner: asyncio.sleep(
+            0, result=[{"text": "记忆"}]
+        )
+
+        async def fake_upgrade(owner, user_name="", umo=""):
+            return {
+                "success": True,
+                "before_count": 2,
+                "after_count": 1,
+                "type_counts": {"preference": 1},
+                "protected_count": 1,
+                "sample_facts": ["fact"],
+            }
+
+        mgr.upgrade_memories = fake_upgrade
+
+        res = run(mgr.upgrade_all_memories())
+        self.assertTrue(res["success"])
+        self.assertEqual(res["total_users"], 2)
+        self.assertEqual(res["success_users"], 2)
+        self.assertEqual(res["before_chunks"], 4)
+        self.assertEqual(res["after_chunks"], 2)
+        self.assertEqual(res["type_counts"]["preference"], 2)
+        self.assertEqual(res["protected_count"], 2)
+
+    def test_admin_commands_permission_and_dispatch(self):
+        class MockMemoryMgr:
+            async def backup_all_memories(self):
+                return {
+                    "success": True,
+                    "file_name": "backup_20261006.json",
+                    "owners_count": 2,
+                    "total_chunks": 5,
+                    "file_size_kb": 1.2,
+                    "file_path": "/path/backup_20261006.json",
+                }
+
+            def list_backups(self):
+                return [
+                    {
+                        "file_name": "backup_20261006.json",
+                        "file_size_kb": 1.2,
+                        "created_at": "2026-10-06 00:00:00",
+                    }
+                ]
+
+            async def upgrade_all_memories(self, progress_callback=None, umo=""):
+                return {
+                    "success": True,
+                    "backup_result": {"file_name": "auto_snap.json"},
+                    "total_users": 2,
+                    "success_users": 2,
+                    "failed_users": [],
+                    "before_chunks": 6,
+                    "after_chunks": 4,
+                    "type_counts": {"preference": 2, "factual": 2},
+                    "protected_count": 2,
+                }
+
+        class MockContext:
+            conversation_manager = None
+            persona_manager = None
+
+        plugin = Main(MockContext(), FakeConfig(memory_enabled=True))
+        plugin.memory = MockMemoryMgr()
+        plugin._ensure_memory = lambda: asyncio.sleep(0, result=plugin.memory)
+        plugin._group_gate = lambda event: {}
+        plugin._gate_block_reason = lambda event: None
+
+        class MemberEvent:
+            role = "member"
+            unified_msg_origin = "member_umo"
+            def is_admin(self): return False
+            def get_sender_id(self): return "1001"
+            def get_sender_name(self): return "普通成员"
+            def plain_result(self, text): return text
+
+        class AdminEvent:
+            role = "admin"
+            unified_msg_origin = "admin_umo"
+            def is_admin(self): return True
+            def get_sender_id(self): return "1000"
+            def get_sender_name(self): return "管理员"
+            def plain_result(self, text): return text
+
+        # 1. 验证普通成员被拦截
+        async def _test_member_backup():
+            res = []
+            async for r in plugin.cmd_memory_backup(MemberEvent()):
+                res.append(r)
+            return res
+
+        r_mem = run(_test_member_backup())
+        self.assertTrue(any("权限不足" in r for r in r_mem))
+
+        async def _test_member_upgrade_all():
+            res = []
+            async for r in plugin.cmd_memory_upgrade_all(MemberEvent()):
+                res.append(r)
+            return res
+
+        r_mem_up = run(_test_member_upgrade_all())
+        self.assertTrue(any("权限不足" in r for r in r_mem_up))
+
+        # 2. 验证管理员执行备份
+        async def _test_admin_backup():
+            res = []
+            async for r in plugin.cmd_memory_backup(AdminEvent()):
+                res.append(r)
+            return res
+
+        r_adm_bak = run(_test_admin_backup())
+        self.assertTrue(any("记忆全量备份完成" in r for r in r_adm_bak))
+
+        # 3. 验证管理员列出备份
+        async def _test_admin_list_backup():
+            res = []
+            async for r in plugin.cmd_memory_backup(AdminEvent(), action="列表"):
+                res.append(r)
+            return res
+
+        r_adm_list = run(_test_admin_list_backup())
+        self.assertTrue(any("历史记忆备份列表" in r for r in r_adm_list))
+
+        # 4. 验证管理员执行全员升级
+        async def _test_admin_upgrade_all():
+            res = []
+            async for r in plugin.cmd_memory_upgrade_all(AdminEvent()):
+                res.append(r)
+            return res
+
+        r_adm_up = run(_test_admin_upgrade_all())
+        self.assertTrue(any("全员记忆结构化升级完成" in r for r in r_adm_up))
+
+        # 5. 验证管理员输入 /记忆升级 全部 自动代理到全员升级
+        async def _test_admin_upgrade_target_all():
+            res = []
+            async for r in plugin.cmd_memory_upgrade(AdminEvent(), target="全部"):
+                res.append(r)
+            return res
+
+        r_adm_all_param = run(_test_admin_upgrade_target_all())
+        self.assertTrue(any("全员记忆结构化升级完成" in r for r in r_adm_all_param))
+
+
+@unittest.skipUnless(_HAS, "需要含 astrbot 的 Python 环境")
+class TestMemoryRestore(unittest.TestCase):
+    """测试记忆恢复功能。"""
+
+    def test_restore_memories_success(self):
+        mgr = make_manager()
+        deleted_owners = []
+        inserted_items = []
+
+        class MockVecDB:
+            async def delete_documents(self, metadata_filters=None):
+                if metadata_filters and "memory_owner" in metadata_filters:
+                    deleted_owners.append(metadata_filters["memory_owner"])
+
+            async def insert(self, content, metadata=None):
+                inserted_items.append((content, metadata))
+
+            async def count_documents(self, metadata_filter=None):
+                return len(inserted_items)
+
+        class MockKB:
+            vec_db = MockVecDB()
+            class kb:
+                kb_id = "test_kb_id"
+
+        mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+        mgr._ensure_mem_doc = lambda kb, owner: asyncio.sleep(0, result="mem_doc_1")
+        mgr._refresh_stats = lambda kb: asyncio.sleep(0)
+        mgr._sync_mem_doc = lambda kb, owner: asyncio.sleep(0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_data = {
+                "backup_version": 1,
+                "created_at": "2026-10-05T12:00:00",
+                "memories": {
+                    "user_a": [
+                        {"text": "用户喜欢吃面条", "updated_at": 100, "metadata": {"type": "preference", "importance": 0.8}},
+                        {"text": "用户在杭州", "updated_at": 101, "metadata": {"type": "factual", "importance": 0.9}},
+                    ],
+                    "user_b": [
+                        {"text": "用户在北京", "updated_at": 102, "metadata": {"type": "factual", "importance": 0.7}},
+                    ]
+                }
+            }
+            bf = os.path.join(tmpdir, "memory_backup_20261005_120000.json")
+            with open(bf, "w", encoding="utf-8") as f:
+                json.dump(backup_data, f)
+
+            # 1. 覆盖恢复全员
+            res = run(mgr.restore_memories_from_backup(
+                backup_identifier="1",
+                mode="overwrite",
+                backup_dir=tmpdir,
+            ))
+            self.assertTrue(res["success"])
+            self.assertEqual(res["restored_owners"], 2)
+            self.assertEqual(res["restored_chunks"], 3)
+            self.assertIn("user_a", deleted_owners)
+            self.assertIn("user_b", deleted_owners)
+
+            # 2. 单独恢复 user_a
+            inserted_items.clear()
+            deleted_owners.clear()
+            res_single = run(mgr.restore_memories_from_backup(
+                backup_identifier="1",
+                mode="overwrite",
+                target_owner="user_a",
+                backup_dir=tmpdir,
+            ))
+            self.assertTrue(res_single["success"])
+            self.assertEqual(res_single["restored_owners"], 1)
+            self.assertEqual(res_single["restored_chunks"], 2)
+            self.assertEqual(deleted_owners, ["user_a"])
+
+    def test_cmd_memory_restore_permissions_and_output(self):
+        class MockMemoryMgr:
+            def list_backups(self, backup_dir=None):
+                return [{
+                    "file_name": "memory_backup_20261005_120000.json",
+                    "file_path": "/fake/memory_backup_20261005_120000.json",
+                    "file_size_kb": 12.5,
+                    "created_at": "2026-10-05 12:00:00",
+                }]
+
+            async def restore_memories_from_backup(self, backup_identifier="1", mode="overwrite", target_owner=None):
+                return {
+                    "success": True,
+                    "message": "记忆恢复成功",
+                    "file_name": "memory_backup_20261005_120000.json",
+                    "mode": mode,
+                    "restored_owners": 2,
+                    "restored_chunks": 5,
+                    "skipped_chunks": 0,
+                    "auto_backup_file": "memory_backup_pre_restore.json",
+                }
+
+        class MockContext:
+            conversation_manager = None
+            persona_manager = None
+
+        plugin = Main(MockContext(), FakeConfig(memory_enabled=True))
+        plugin.memory = MockMemoryMgr()
+        plugin._ensure_memory = lambda: asyncio.sleep(0, result=plugin.memory)
+
+        class MemberEvent:
+            role = "member"
+            def is_admin(self): return False
+            def get_sender_id(self): return "1001"
+            def plain_result(self, text): return text
+
+        class AdminEvent:
+            role = "admin"
+            def is_admin(self): return True
+            def get_sender_id(self): return "1000"
+            def plain_result(self, text): return text
+
+        # 普通用户拦截
+        async def _test_member():
+            res = []
+            async for r in plugin.cmd_memory_restore(MemberEvent()):
+                res.append(r)
+            return res
+
+        r_mem = run(_test_member())
+        self.assertTrue(any("权限不足" in r for r in r_mem))
+
+        # 管理员无参数列出备份
+        async def _test_admin_list():
+            res = []
+            async for r in plugin.cmd_memory_restore(AdminEvent()):
+                res.append(r)
+            return res
+
+        r_adm_list = run(_test_admin_list())
+        self.assertTrue(any("可用记忆备份列表" in r for r in r_adm_list))
+
+        # 管理员指定备份恢复
+        async def _test_admin_restore():
+            res = []
+            async for r in plugin.cmd_memory_restore(AdminEvent(), target="1"):
+                res.append(r)
+            return res
+
+        r_adm_restore = run(_test_admin_restore())
+        self.assertTrue(any("记忆恢复完成" in r for r in r_adm_restore))
+        self.assertTrue(any("恢复用户数: 2 位" in r for r in r_adm_restore))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+

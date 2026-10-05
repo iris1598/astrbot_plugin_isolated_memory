@@ -324,6 +324,25 @@ class Main(Star):
             return f"群 {group_id} 的记忆开关在插件配置中已关闭。"
         return None
 
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """检查当前发送者是否具备管理员权限（Bot 管理员或群管理员）。"""
+        if hasattr(event, "is_admin") and callable(event.is_admin):
+            try:
+                if event.is_admin():
+                    return True
+            except Exception:
+                pass
+        if getattr(event, "role", "member") == "admin":
+            return True
+        try:
+            sender_id = str(event.get_sender_id() or "")
+            admins = self.config.get("admins_id", []) or []
+            if sender_id and sender_id in [str(a) for a in admins]:
+                return True
+        except Exception:
+            pass
+        return False
+
     @staticmethod
     def _find_group_config(group_id: str, groups: list[dict]) -> dict | None:
         for item in groups or []:
@@ -852,7 +871,10 @@ class Main(Star):
             "/会话压缩 [保留条数]  手动 LLM 摘要压缩（默认保留 5 条，0=全部）",
             "/存档 <名称>  /读档 <名称>  /存档列表  /删档 <名称>",
             "—",
-            "/记忆状态  /记忆查询 <内容>  /记忆添加 <内容>  /记忆开关 开|关  /记忆清除",
+            "/记忆状态  /记忆查询 <内容>  /记忆添加 <内容>  /记忆升级  /记忆开关 开|关  /记忆清除",
+            "/记忆备份 [列表]      【管理员】全量备份当前记忆数据 / 查看历史快照",
+            "/记忆恢复 <序号|名称> 【管理员】从备份快照恢复记忆数据（支持覆盖/合并）",
+            "/记忆全员升级         【管理员】全量重构升级所有人的记忆（升级前自动备份）",
             "xxti (或 /xxti)       依据全部记忆做特质比对生成鸣潮角色共鸣档案（免/触发）",
             "提示：存档即官方「同会话多对话」，WebUI 对话管理同样可见。",
         ]))
@@ -988,6 +1010,7 @@ class Main(Star):
             "",
             "使用 /记忆查询 <内容> 预览召回结果",
             "使用 /记忆添加 <内容> 手动添加一条记忆",
+            "使用 /记忆升级 全量原子化重构与属性升级",
             "使用 /记忆清除 清空当前记忆",
             "使用 /记忆开关 开|关 切换",
         ]
@@ -1087,6 +1110,238 @@ class Main(Star):
             yield event.plain_result(f"✅ 已记录记忆：\n{content_str}")
         else:
             yield event.plain_result("❌ 记录记忆失败，请检查知识库配置。")
+
+    @filter.command("记忆升级", alias={"memory_upgrade", "记忆重构", "记忆重整"})
+    async def cmd_memory_upgrade(self, event: AstrMessageEvent, target: str = ""):
+        """对你在当前会话中的历史记忆进行全量原子化重构与属性升级（管理员可输入 /记忆升级 全部）"""
+        target_clean = (target or "").strip().lower()
+        if target_clean in ("全部", "all", "全员"):
+            if not self._is_admin(event):
+                yield event.plain_result("❌ 权限不足：全员记忆升级仅限管理员执行。个人升级请直接使用 /记忆升级。")
+                return
+            async for r in self.cmd_memory_upgrade_all(event):
+                yield r
+            return
+
+        if await self._ensure_memory() is None:
+            yield event.plain_result(self._system_off_message())
+            return
+        reason = self._gate_block_reason(event)
+        if reason:
+            yield event.plain_result("❌ " + reason)
+            return
+
+        owner = event.unified_msg_origin
+        user_name = event.get_sender_name() or ""
+        yield event.plain_result("⏳ 正在对当前历史记忆进行原子化提炼与结构化重构，请稍候...")
+        res = await self.memory.upgrade_memories(
+            owner=owner,
+            user_name=user_name,
+            umo=owner,
+        )
+        if not res.get("success"):
+            yield event.plain_result(f"❌ {res.get('message', '记忆升级失败')}")
+            return
+
+        if res.get("before_count", 0) == 0:
+            yield event.plain_result("ℹ️ 当前会话尚未积累任何记忆，无需升级。")
+            return
+
+        type_counts = res.get("type_counts", {})
+        lines = [
+            "✨【记忆结构化升级完成】",
+            f"• 原始记忆: {res.get('before_count')} 条",
+            f"• 重构后原子记忆: {res.get('after_count')} 条",
+            f"  - 偏好/禁忌 (preference): {type_counts.get('preference', 0)} 条",
+            f"  - 个人资料 (factual): {type_counts.get('factual', 0)} 条",
+            f"  - 既定计划 (planned): {type_counts.get('planned', 0)} 条",
+            f"  - 重要经历 (episodic): {type_counts.get('episodic', 0)} 条",
+            f"• 永久保护记忆(重要度≥0.85): {res.get('protected_count', 0)} 条（享有防衰减清扫豁免）",
+            "",
+            "💡 现已全面启用动态意图加权、类型定向提权与防幻觉护轨！可使用 /记忆查询 查看详情。",
+        ]
+        sample_facts = res.get("sample_facts", [])
+        if sample_facts:
+            lines.append("\n【重构记忆预览】")
+            for i, sf in enumerate(sample_facts[:5], 1):
+                lines.append(f"{i}. {sf}")
+            if len(sample_facts) > 5:
+                lines.append(f"... 等共 {len(sample_facts)} 条")
+
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("记忆全员升级", alias={"memory_upgrade_all", "记忆升级全员"})
+    async def cmd_memory_upgrade_all(self, event: AstrMessageEvent):
+        """【管理员命令】对知识库中所有用户的历史记忆执行全量原子化重构与属性升级"""
+        if not self._is_admin(event):
+            yield event.plain_result("❌ 权限不足：全员记忆升级仅限管理员执行。普通成员请直接使用 /记忆升级 升级个人记忆。")
+            return
+        if await self._ensure_memory() is None:
+            yield event.plain_result(self._system_off_message())
+            return
+
+        yield event.plain_result("⏳ 正在为所有用户执行全量记忆重构与属性升级...\n（系统将自动创建全量快照备份以保障数据安全，请稍候）")
+        res = await self.memory.upgrade_all_memories(umo=event.unified_msg_origin)
+        if not res.get("success"):
+            yield event.plain_result(f"❌ {res.get('message', '全员记忆升级失败')}")
+            return
+
+        if res.get("total_users", 0) == 0:
+            yield event.plain_result("ℹ️ 当前知识库暂无任何用户的记忆数据，无需升级。")
+            return
+
+        b_res = res.get("backup_result") or {}
+        b_name = b_res.get("file_name") or "已就绪"
+        type_counts = res.get("type_counts") or {}
+        failed = res.get("failed_users") or []
+
+        lines = [
+            "🎉【全员记忆结构化升级完成】",
+            f"• 安全备份快照: {b_name}",
+            f"• 涉及用户: 共 {res.get('total_users')} 位（成功 {res.get('success_users')} 位，失败 {len(failed)} 位）",
+            f"• 记忆重构统计: 原始 {res.get('before_chunks')} 条 ➔ 重构后 {res.get('after_chunks')} 条原子记忆",
+            f"  - 偏好/禁忌 (preference): {type_counts.get('preference', 0)} 条",
+            f"  - 个人资料 (factual): {type_counts.get('factual', 0)} 条",
+            f"  - 既定计划 (planned): {type_counts.get('planned', 0)} 条",
+            f"  - 重要经历 (episodic): {type_counts.get('episodic', 0)} 条",
+            f"• 永久保护记忆(重要度≥0.85): {res.get('protected_count', 0)} 条（享有防衰减清扫豁免）",
+            "",
+            "💡 全员记忆已重构完毕并启用动态意图加权与防幻觉护轨！",
+        ]
+        if failed:
+            lines.append("\n【部分异常用户】")
+            for u, err in failed[:3]:
+                lines.append(f"- {u}: {err}")
+            if len(failed) > 3:
+                lines.append(f"... 等共 {len(failed)} 位")
+
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("记忆备份", alias={"memory_backup"})
+    async def cmd_memory_backup(self, event: AstrMessageEvent, action: str = ""):
+        """【管理员命令】全量备份或查看已有记忆备份快照（用法: /记忆备份 或 /记忆备份 列表）"""
+        if not self._is_admin(event):
+            yield event.plain_result("❌ 权限不足：记忆备份属于管理员命令。")
+            return
+        if await self._ensure_memory() is None:
+            yield event.plain_result(self._system_off_message())
+            return
+
+        action_clean = (action or "").strip().lower()
+        if action_clean in ("列表", "list", "ls"):
+            backups = self.memory.list_backups()
+            if not backups:
+                yield event.plain_result("ℹ️ 暂无任何历史记忆备份文件。使用 /记忆备份 立即创建。")
+                return
+            lines = ["📦【历史记忆备份列表】"]
+            for i, b in enumerate(backups[:10], 1):
+                lines.append(f"{i}. {b['file_name']} ({b['file_size_kb']} KB) - {b['created_at']}")
+            if len(backups) > 10:
+                lines.append(f"... 等共 {len(backups)} 个备份文件")
+            lines.append("📁 存放路径: data/plugins/astrbot_plugin_isolated_memory/backups/")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        yield event.plain_result("⏳ 正在为知识库中的全员记忆创建全量快照备份，请稍候...")
+        res = await self.memory.backup_all_memories()
+        if not res.get("success"):
+            yield event.plain_result(f"❌ {res.get('message', '记忆备份失败')}")
+            return
+
+        if res.get("total_chunks", 0) == 0:
+            yield event.plain_result("ℹ️ 当前知识库暂无任何用户的记忆数据，未生成备份文件。")
+            return
+
+        lines = [
+            "💾【记忆全量备份完成】",
+            f"• 备份文件: {res.get('file_name')}",
+            f"• 涉及用户: {res.get('owners_count')} 位",
+            f"• 记忆总数: {res.get('total_chunks')} 条",
+            f"• 文件大小: {res.get('file_size_kb')} KB",
+            f"• 存放路径: {res.get('file_path')}",
+            "",
+            "💡 可随时使用 /记忆备份 列表 查看历史备份快照。",
+        ]
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("记忆恢复", alias={"memory_restore", "记忆还原"})
+    async def cmd_memory_restore(
+        self,
+        event: AstrMessageEvent,
+        target: str = "",
+        mode: str = "",
+        extra: str = "",
+    ):
+        """【管理员命令】从备份文件恢复全员或指定用户的记忆（用法: /记忆恢复 或 /记忆恢复 1 或 /记忆恢复 1 合并）"""
+        if not self._is_admin(event):
+            yield event.plain_result("❌ 权限不足：记忆恢复属于管理员命令。")
+            return
+        if await self._ensure_memory() is None:
+            yield event.plain_result(self._system_off_message())
+            return
+
+        target_clean = (target or "").strip()
+        if not target_clean or target_clean in ("列表", "list", "help", "帮助"):
+            backups = self.memory.list_backups()
+            if not backups:
+                yield event.plain_result("ℹ️ 暂无任何历史记忆备份文件。请先使用 /记忆备份 创建备份。")
+                return
+            lines = ["📦【可用记忆备份列表】"]
+            for i, b in enumerate(backups[:10], 1):
+                lines.append(f"{i}. {b['file_name']} ({b['file_size_kb']} KB) - {b['created_at']}")
+            if len(backups) > 10:
+                lines.append(f"... 等共 {len(backups)} 个备份文件")
+            lines.extend([
+                "",
+                "💡 恢复使用方式：",
+                "• 恢复最新备份：/记忆恢复 1",
+                "• 恢复指定备份：/记忆恢复 <序号或文件名>",
+                "• 合并模式恢复：/记忆恢复 1 合并（默认覆盖还原）",
+                "• 恢复指定用户：/记忆恢复 1 覆盖 <umo>",
+                "📁 备份目录: data/plugins/astrbot_plugin_isolated_memory/backups/",
+            ])
+            yield event.plain_result("\n".join(lines))
+            return
+
+        restore_mode = "overwrite"
+        target_owner = None
+        for arg in [mode, extra]:
+            arg_clean = (arg or "").strip().lower()
+            if not arg_clean:
+                continue
+            if arg_clean in ("merge", "合并", "增量", "追加"):
+                restore_mode = "merge"
+            elif arg_clean in ("overwrite", "覆盖", "全量"):
+                restore_mode = "overwrite"
+            else:
+                target_owner = arg.strip()
+
+        mode_name = "合并追加" if restore_mode == "merge" else "覆盖还原"
+        yield event.plain_result(f"⏳ 正在执行记忆恢复（模式: {mode_name}），恢复前将自动创建实时快照，请稍候...")
+
+        res = await self.memory.restore_memories_from_backup(
+            backup_identifier=target_clean,
+            mode=restore_mode,
+            target_owner=target_owner,
+        )
+        if not res.get("success"):
+            yield event.plain_result(f"❌ {res.get('message', '记忆恢复失败')}")
+            return
+
+        lines = [
+            "🔄【记忆恢复完成】",
+            f"• 备份来源: {res.get('file_name')}",
+            f"• 恢复模式: {mode_name}",
+            f"• 恢复用户数: {res.get('restored_owners')} 位",
+            f"• 恢复记忆数: {res.get('restored_chunks')} 条",
+        ]
+        if restore_mode == "merge" and res.get("skipped_chunks", 0) > 0:
+            lines.append(f"• 跳过重复: {res.get('skipped_chunks')} 条")
+        if res.get("auto_backup_file"):
+            lines.append(f"• 安全快照: 已自动生成恢复前快照 {res.get('auto_backup_file')}")
+        lines.append("\n💡 记忆已重新同步至向量知识库，可使用 /记忆查询 或 /记忆状态 检验效果。")
+
+        yield event.plain_result("\n".join(lines))
 
     @filter.regex(
         r"^(?:/|/|#)?\s*(?i:(?:xxti|记忆测评|mbti|memory_mbti))(?:\s+.*)?$"

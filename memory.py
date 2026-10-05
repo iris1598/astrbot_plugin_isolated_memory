@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -1383,6 +1384,642 @@ class MemoryManager:
                 "texts": [],
             }
 
+    def _build_upgrade_prompt(
+        self,
+        docs: list[dict],
+        user_name: str = "",
+    ) -> str:
+        """构造存量历史记忆全量重构提炼提示词。"""
+        use_names = bool(self._cfg("memory_extract_use_names", True)) and bool(
+            (user_name or "").strip()
+        )
+        user_label = user_name.strip() if use_names else "用户"
+
+        mem_lines = []
+        for i, doc in enumerate(docs, 1):
+            text = (doc.get("text") or "").strip()
+            if text:
+                mem_lines.append(f"{i}. {text}")
+        raw_memories_block = "\n".join(mem_lines)
+
+        return (
+            f"# 角色与核心目标\n"
+            f"你是长期记忆系统架构师与提炼重构专家。\n"
+            f"当前我们正在对「{user_label}」的历史长期记忆库进行全量重构与原子化升级。\n"
+            f"过去积累的历史记忆条目往往零散碎片、语义重复、缺乏精确的重要性评估与分类标签。\n"
+            f"请对以下给出的历史记忆列表进行全面的【深度合并去重】、【原子化事实重构】以及【属性精准标注】。\n\n"
+            f"# 待重构的历史记忆条目\n"
+            f"<raw_memories>\n{raw_memories_block}\n</raw_memories>\n\n"
+            f"# 重构与提炼要求\n"
+            f"1. **合并去重**：合并语义重叠、互为补充或零散碎片的内容，去粗取精，整合为更加清晰、确切、高价值的独立陈述。剔除毫无长效交流价值的临时琐事或废话。\n"
+            f"2. **原子化精炼**：每条新记忆必须是一个独立完整、主谓宾齐全的原子事实（每条控制在 15~150 字符，以「{user_label}」为明确主语）。\n"
+            f"3. **事实类型精确归类 (fact_type)**（必须为以下四类之一）：\n"
+            f"   - preference: 长期喜好、厌恶、饮食忌口、身体过敏、生活习惯、回复风格偏好；\n"
+            f"   - factual: 真实姓名、职业、学业、居住地、家庭成员、宠物、长期背景档案；\n"
+            f"   - planned: 长期目标、重要阶段性日程、未完成的既定计划或约定；\n"
+            f"   - episodic: 亲身经历过的特定重大事件、难忘过往经历或事实回顾。\n"
+            f"4. **重要度评分 (importance，浮点数 0.10 ~ 1.00)**：\n"
+            f"   - 0.85 ~ 1.00（核心长效事实，享受永久保护防淘汰）：如姓名、职业、食物过敏/忌口、重要家庭关系、人生长远规划；\n"
+            f"   - 0.60 ~ 0.84（重要事实与明确偏好）：技术栈、明确喜好/习惯、确定的近期计划；\n"
+            f"   - 0.30 ~ 0.59（普通背景经历或轻度事实）：一般性过往经历、临时项目记录；\n"
+            f"   - 0.10 ~ 0.29（低优先级事实）。\n\n"
+            f"# 输出格式\n"
+            f"请直接输出纯 JSON 数组，严禁任何额外解释或 Markdown 格式以外的文字包裹：\n"
+            f'[\n  {{"content": "{user_label}对虾蟹有轻微过敏，饮食严格避免海鲜", "importance": 0.95, "fact_type": "preference"}},\n  {{"content": "{user_label}目前在上海从事后端开发，主修 Python 与 Go", "importance": 0.88, "fact_type": "factual"}}\n]'
+        )
+
+    async def upgrade_memories(
+        self,
+        owner: str,
+        user_name: str = "",
+        umo: str = "",
+    ) -> dict:
+        """对某用户的全部存量旧记忆进行全量重构、原子化提炼与结构化属性升级。
+
+        读取现有所有记忆，交给 LLM 进行合并去重与原子化重塑，
+        并为每条记忆注入准确的 importance (0.1~1.0) 和 fact_type (preference/factual/planned/episodic)。
+
+        Args:
+            owner: 记忆归属键（UMO）。
+            user_name: 用户昵称（可选）。
+            umo: 会话 UMO（用于解析模型）。
+
+        Returns:
+            dict: {
+                "success": bool,
+                "message": str,
+                "before_count": int,
+                "after_count": int,
+                "type_counts": dict[str, int],
+                "protected_count": int,
+                "sample_facts": list[str],
+            }
+        """
+        kb = await self.ensure_kb()
+        if kb is None:
+            return {
+                "success": False,
+                "message": "知识库未初始化或不可用",
+                "before_count": 0,
+                "after_count": 0,
+                "type_counts": {},
+                "protected_count": 0,
+                "sample_facts": [],
+            }
+
+        lock = self._locks.setdefault(owner, asyncio.Lock())
+        async with lock:
+            try:
+                docs = await self._all_owner_chunks(kb.vec_db, owner)
+                before_count = len(docs)
+                if not before_count:
+                    return {
+                        "success": True,
+                        "message": "当前没有已保存的记忆，无需升级。",
+                        "before_count": 0,
+                        "after_count": 0,
+                        "type_counts": {},
+                        "protected_count": 0,
+                        "sample_facts": [],
+                    }
+
+                prompt = self._build_upgrade_prompt(docs, user_name=user_name)
+                timeout = max(60, self._extract_timeout() + 30)
+                result = await self._llm_chat(
+                    prompt,
+                    provider_id=self._extract_provider_id(),
+                    timeout=timeout,
+                    umo=umo or owner,
+                )
+                if not result:
+                    return {
+                        "success": False,
+                        "message": "升级失败：模型未返回结果或请求超时，原有记忆未作改动。",
+                        "before_count": before_count,
+                        "after_count": before_count,
+                        "type_counts": {},
+                        "protected_count": 0,
+                        "sample_facts": [],
+                    }
+
+                facts = self._parse_extraction(result)
+                if not facts:
+                    return {
+                        "success": False,
+                        "message": "升级失败：模型未能生成有效的结构化记忆，原有记忆未作改动。",
+                        "before_count": before_count,
+                        "after_count": before_count,
+                        "type_counts": {},
+                        "protected_count": 0,
+                        "sample_facts": [],
+                    }
+
+                # 确认新生成了有效结构化记忆后再清理旧 chunk
+                await kb.vec_db.delete_documents(
+                    metadata_filters={"memory_owner": owner}
+                )
+
+                ts = int(time.time())
+                doc_id = await self._ensure_mem_doc(kb, owner)
+                type_counts = {"preference": 0, "factual": 0, "planned": 0, "episodic": 0}
+                protected_count = 0
+                sample_facts = []
+
+                for idx, fact in enumerate(facts):
+                    text = str(fact).strip()[:ENTRY_MAX_CHARS]
+                    if not text:
+                        continue
+                    importance = getattr(fact, "importance", 0.6)
+                    fact_type = getattr(fact, "fact_type", "factual")
+                    if fact_type not in type_counts:
+                        fact_type = "factual"
+                    type_counts[fact_type] += 1
+                    if importance >= 0.85:
+                        protected_count += 1
+
+                    sample_facts.append(f"[{fact_type}] {text} (重要度: {importance:.2f})")
+
+                    metadata = {
+                        "kb_id": kb.kb.kb_id,
+                        "kb_doc_id": doc_id,
+                        "chunk_index": idx,
+                        "memory_owner": owner,
+                        "memory_created_at": ts,
+                        "memory_updated_at": ts,
+                        "user_id": owner,
+                        "importance": round(importance, 2),
+                        "type": fact_type,
+                    }
+                    await kb.vec_db.insert(content=text, metadata=metadata)
+
+                await self._refresh_stats(kb)
+                await self._sync_mem_doc(kb, owner)
+
+                return {
+                    "success": True,
+                    "message": "记忆升级成功",
+                    "before_count": before_count,
+                    "after_count": len(sample_facts),
+                    "type_counts": type_counts,
+                    "protected_count": protected_count,
+                    "sample_facts": sample_facts,
+                }
+            except Exception as e:
+                logger.error(f"[IsolatedMemory] 记忆全量重构升级异常: {e}")
+                return {
+                    "success": False,
+                    "message": f"升级过程发生异常: {e}",
+                    "before_count": 0,
+                    "after_count": 0,
+                    "type_counts": {},
+                    "protected_count": 0,
+                    "sample_facts": [],
+                }
+
+    async def get_all_memory_owners(self) -> list[str]:
+        """获取当前记忆知识库中拥有记忆的所有用户/会话 owner 列表。
+
+        Returns:
+            list[str]: 排序后的 owner 标识列表。
+        """
+        kb = await self.ensure_kb()
+        if kb is None:
+            return []
+        owners: set[str] = set()
+
+        # 方式 1: 从 KBDocument 元数据表查询虚拟记忆文档
+        try:
+            async with kb.kb_db.get_db() as session:
+                stmt = select(KBDocument).where(
+                    col(KBDocument.file_type) == "memory",
+                    col(KBDocument.kb_id) == kb.kb.kb_id,
+                )
+                docs = (await session.execute(stmt)).scalars().all()
+                for d in docs:
+                    name = getattr(d, "doc_name", "") or ""
+                    if name.startswith("[记忆] "):
+                        owner = name[len("[记忆] "):].strip()
+                        if owner:
+                            owners.add(owner)
+        except Exception as e:
+            logger.debug(f"[IsolatedMemory] 从 KBDocument 获取所有者失败: {e}")
+
+        # 方式 2: 从 vec_db document_storage 获取全部带有 memory_owner 的 chunks 补充
+        try:
+            ds = getattr(kb.vec_db, "document_storage", None)
+            if ds and hasattr(ds, "get_documents"):
+                rows = await ds.get_documents(offset=None, limit=None)
+                for r in rows:
+                    md = r.get("metadata")
+                    if isinstance(md, str):
+                        try:
+                            md = json.loads(md)
+                        except Exception:
+                            md = {}
+                    if isinstance(md, dict) and md.get("memory_owner"):
+                        owners.add(str(md["memory_owner"]).strip())
+        except Exception as e:
+            logger.debug(f"[IsolatedMemory] 从 document_storage 获取所有者失败: {e}")
+
+        return sorted(list(owners))
+
+    async def backup_all_memories(self, backup_dir: str | None = None) -> dict:
+        """全量备份知识库中所有用户的记忆，生成结构化 JSON 备份文件。
+
+        Args:
+            backup_dir: 备份文件存放目录（默认存放在插件 data/backups 目录下）。
+
+        Returns:
+            dict: {
+                "success": bool,
+                "message": str,
+                "file_path": str | None,
+                "file_name": str | None,
+                "file_size_kb": float,
+                "owners_count": int,
+                "total_chunks": int,
+            }
+        """
+        kb = await self.ensure_kb()
+        if kb is None:
+            return {
+                "success": False,
+                "message": "知识库未初始化或不可用",
+                "file_path": None,
+                "file_name": None,
+                "file_size_kb": 0.0,
+                "owners_count": 0,
+                "total_chunks": 0,
+            }
+
+        try:
+            if not backup_dir:
+                try:
+                    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+                    base_data = get_astrbot_data_path()
+                except Exception:
+                    base_data = "data"
+                backup_dir = os.path.join(
+                    base_data, "plugins", "astrbot_plugin_isolated_memory", "backups"
+                )
+            os.makedirs(backup_dir, exist_ok=True)
+
+            owners = await self.get_all_memory_owners()
+            owner_data: dict[str, list[dict]] = {}
+            total_chunks = 0
+
+            for owner in owners:
+                docs = await self._all_owner_chunks(kb.vec_db, owner)
+                if docs:
+                    cleaned_docs = []
+                    for d in docs:
+                        cleaned_docs.append({
+                            "text": d.get("text", ""),
+                            "updated_at": d.get("updated_at"),
+                            "metadata": d.get("metadata", {}),
+                        })
+                    owner_data[owner] = cleaned_docs
+                    total_chunks += len(cleaned_docs)
+
+            if total_chunks == 0:
+                return {
+                    "success": True,
+                    "message": "当前知识库暂无任何记忆数据，未生成备份文件。",
+                    "file_path": None,
+                    "file_name": None,
+                    "file_size_kb": 0.0,
+                    "owners_count": 0,
+                    "total_chunks": 0,
+                }
+
+            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_name = f"memory_backup_{ts_str}.json"
+            file_path = os.path.join(backup_dir, file_name)
+
+            payload = {
+                "backup_version": 1,
+                "created_at": datetime.now().isoformat(),
+                "kb_id": getattr(kb.kb, "kb_id", ""),
+                "kb_name": getattr(kb.kb, "kb_name", ""),
+                "total_owners": len(owner_data),
+                "total_chunks": total_chunks,
+                "memories": owner_data,
+            }
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            file_size_kb = round(os.path.getsize(file_path) / 1024, 2)
+            logger.info(
+                f"[IsolatedMemory] 记忆全量备份完成: {file_name}, "
+                f"用户数: {len(owner_data)}, 记忆数: {total_chunks}, 大小: {file_size_kb} KB"
+            )
+
+            return {
+                "success": True,
+                "message": "备份成功",
+                "file_path": file_path,
+                "file_name": file_name,
+                "file_size_kb": file_size_kb,
+                "owners_count": len(owner_data),
+                "total_chunks": total_chunks,
+            }
+        except Exception as e:
+            logger.error(f"[IsolatedMemory] 记忆全量备份失败: {e}")
+            return {
+                "success": False,
+                "message": f"备份过程发生异常: {e}",
+                "file_path": None,
+                "file_name": None,
+                "file_size_kb": 0.0,
+                "owners_count": 0,
+                "total_chunks": 0,
+            }
+
+    def list_backups(self, backup_dir: str | None = None) -> list[dict]:
+        """列出已有的记忆备份文件列表（按创建时间降序）。"""
+        if not backup_dir:
+            try:
+                from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+                base_data = get_astrbot_data_path()
+            except Exception:
+                base_data = "data"
+            backup_dir = os.path.join(
+                base_data, "plugins", "astrbot_plugin_isolated_memory", "backups"
+            )
+        if not os.path.exists(backup_dir):
+            return []
+
+        out = []
+        for fn in os.listdir(backup_dir):
+            if fn.endswith(".json") and fn.startswith("memory_backup_"):
+                fp = os.path.join(backup_dir, fn)
+                try:
+                    stat = os.stat(fp)
+                    size_kb = round(stat.st_size / 1024, 2)
+                    mtime = stat.st_mtime
+                    mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    out.append({
+                        "file_name": fn,
+                        "file_path": fp,
+                        "file_size_kb": size_kb,
+                        "created_at": mtime_str,
+                        "mtime": mtime,
+                    })
+                except Exception:
+                    pass
+        out.sort(key=lambda x: x["mtime"], reverse=True)
+        return out
+
+    async def restore_memories_from_backup(
+        self,
+        backup_identifier: str = "1",
+        mode: str = "overwrite",
+        target_owner: str | None = None,
+        backup_dir: str | None = None,
+    ) -> dict:
+        """从备份文件恢复知识库记忆。
+
+        Args:
+            backup_identifier: 备份文件序号（如 "1" 表示最新）或文件名/路径。
+            mode: "overwrite"（覆盖还原）或 "merge"（合并追加）。
+            target_owner: 可选，仅恢复指定用户的记忆。
+            backup_dir: 备份目录（默认为插件 data/backups 目录）。
+
+        Returns:
+            dict: 恢复结果统计字典。
+        """
+        if not backup_dir:
+            try:
+                from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+                base_data = get_astrbot_data_path()
+            except Exception:
+                base_data = "data"
+            backup_dir = os.path.join(
+                base_data, "plugins", "astrbot_plugin_isolated_memory", "backups"
+            )
+
+        backups = self.list_backups(backup_dir)
+        target_file = None
+
+        ident = str(backup_identifier).strip()
+        if ident.isdigit():
+            idx = int(ident) - 1
+            if 0 <= idx < len(backups):
+                target_file = backups[idx]["file_path"]
+            else:
+                return {
+                    "success": False,
+                    "message": f"备份序号 {ident} 超出范围，当前共有 {len(backups)} 个备份文件。",
+                }
+        elif ident.lower() in ("latest", "最新", "newest", ""):
+            if backups:
+                target_file = backups[0]["file_path"]
+            else:
+                return {
+                    "success": False,
+                    "message": "当前暂无可用的记忆备份文件。",
+                }
+        else:
+            candidate = os.path.join(backup_dir, ident)
+            if os.path.isfile(candidate):
+                target_file = candidate
+            elif os.path.isfile(ident):
+                target_file = ident
+            else:
+                for b in backups:
+                    if ident in b["file_name"]:
+                        target_file = b["file_path"]
+                        break
+                if not target_file:
+                    return {
+                        "success": False,
+                        "message": f"未找到匹配的备份文件: {ident}",
+                    }
+
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"读取备份文件失败: {e}",
+            }
+
+        memories = payload.get("memories")
+        if not isinstance(memories, dict) or not memories:
+            return {
+                "success": False,
+                "message": "备份文件内没有有效的记忆数据（memories 字段为空）。",
+            }
+
+        kb = await self.ensure_kb()
+        if kb is None:
+            return {
+                "success": False,
+                "message": "知识库未初始化或不可用",
+            }
+
+        # 恢复前自动创建实时快照（安全防误操作）
+        auto_backup_res = await self.backup_all_memories(backup_dir)
+
+        if target_owner:
+            if target_owner not in memories:
+                return {
+                    "success": False,
+                    "message": f"备份文件中未包含指定用户 {target_owner} 的记忆数据。",
+                }
+            owners_to_restore = {target_owner: memories[target_owner]}
+        else:
+            owners_to_restore = memories
+
+        restored_owners = 0
+        restored_chunks = 0
+        skipped_chunks = 0
+
+        for owner, chunks in owners_to_restore.items():
+            if not isinstance(chunks, list):
+                continue
+            lock = self._locks.setdefault(owner, asyncio.Lock())
+            async with lock:
+                try:
+                    if mode == "overwrite":
+                        await kb.vec_db.delete_documents(
+                            metadata_filters={"memory_owner": owner}
+                        )
+
+                    existing_texts = set()
+                    if mode == "merge":
+                        existing_docs = await self._all_owner_chunks(kb.vec_db, owner)
+                        existing_texts = {str(d.get("text", "")).strip() for d in existing_docs}
+
+                    doc_id = await self._ensure_mem_doc(kb, owner)
+                    ts = int(time.time())
+
+                    for idx, chunk in enumerate(chunks):
+                        text = str(chunk.get("text", "")).strip()
+                        if not text:
+                            continue
+                        if mode == "merge" and text in existing_texts:
+                            skipped_chunks += 1
+                            continue
+
+                        meta = dict(chunk.get("metadata", {}))
+                        meta["kb_id"] = kb.kb.kb_id
+                        meta["kb_doc_id"] = doc_id
+                        meta["memory_owner"] = owner
+                        meta["user_id"] = owner
+                        if "memory_updated_at" not in meta:
+                            meta["memory_updated_at"] = chunk.get("updated_at") or ts
+                        if "chunk_index" not in meta:
+                            meta["chunk_index"] = idx
+
+                        await kb.vec_db.insert(content=text, metadata=meta)
+                        if mode == "merge":
+                            existing_texts.add(text)
+                        restored_chunks += 1
+
+                    await self._refresh_stats(kb)
+                    await self._sync_mem_doc(kb, owner)
+                    restored_owners += 1
+                except Exception as e:
+                    logger.error(f"[IsolatedMemory] 恢复用户 {owner} 记忆失败: {e}")
+
+        file_name = os.path.basename(target_file)
+        logger.info(
+            f"[IsolatedMemory] 从备份 {file_name} 恢复完成: {restored_owners} 位用户, "
+            f"{restored_chunks} 条记忆 (跳过重复 {skipped_chunks} 条)"
+        )
+
+        return {
+            "success": True,
+            "message": "记忆恢复成功",
+            "file_name": file_name,
+            "file_path": target_file,
+            "mode": mode,
+            "restored_owners": restored_owners,
+            "restored_chunks": restored_chunks,
+            "skipped_chunks": skipped_chunks,
+            "auto_backup_file": auto_backup_res.get("file_name"),
+        }
+
+    async def upgrade_all_memories(
+        self, progress_callback=None, umo: str = ""
+    ) -> dict:
+        """为知识库中所有用户全量执行记忆升级与结构化重构（升级前会自动先执行全量备份）。
+
+        Args:
+            progress_callback: 进度回调 (owner, index, total, res)。
+            umo: 用于模型解析的会话 UMO。
+
+        Returns:
+            dict: 全员升级汇总指标。
+        """
+        # 1. 升级前自动执行安全快照备份
+        backup_res = await self.backup_all_memories()
+
+        owners = await self.get_all_memory_owners()
+        if not owners:
+            return {
+                "success": True,
+                "message": "当前知识库暂无任何用户的记忆数据，无需升级。",
+                "backup_result": backup_res,
+                "total_users": 0,
+                "success_users": 0,
+                "failed_users": [],
+                "before_chunks": 0,
+                "after_chunks": 0,
+                "type_counts": {},
+                "protected_count": 0,
+            }
+
+        kb = await self.ensure_kb()
+        success_users = 0
+        failed_users = []
+        total_before = 0
+        total_after = 0
+        total_protected = 0
+        aggregated_types = {"preference": 0, "factual": 0, "planned": 0, "episodic": 0}
+
+        for idx, owner in enumerate(owners, 1):
+            try:
+                docs = await self._all_owner_chunks(kb.vec_db, owner)
+                if not docs:
+                    continue
+                res = await self.upgrade_memories(owner=owner, umo=umo or owner)
+                if res.get("success"):
+                    success_users += 1
+                    total_before += res.get("before_count", 0)
+                    total_after += res.get("after_count", 0)
+                    total_protected += res.get("protected_count", 0)
+                    for k, v in res.get("type_counts", {}).items():
+                        aggregated_types[k] = aggregated_types.get(k, 0) + v
+                else:
+                    failed_users.append((owner, res.get("message", "未知原因")))
+
+                if progress_callback:
+                    try:
+                        await progress_callback(owner, idx, len(owners), res)
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error(f"[IsolatedMemory] 全员升级处理用户 {owner} 异常: {e}")
+                failed_users.append((owner, str(e)))
+
+        return {
+            "success": True,
+            "message": "全员记忆升级执行完成",
+            "backup_result": backup_res,
+            "total_users": len(owners),
+            "success_users": success_users,
+            "failed_users": failed_users,
+            "before_chunks": total_before,
+            "after_chunks": total_after,
+            "type_counts": aggregated_types,
+            "protected_count": total_protected,
+        }
+
     async def _all_owner_chunks(self, vec_db, owner: str) -> list[dict]:
         """拉取某用户全部记忆 chunk。
 
@@ -1627,7 +2264,9 @@ class MemoryManager:
                         importance = float(value.get("importance", 0.6) or 0.6)
                     except (ValueError, TypeError):
                         importance = 0.6
-                    fact_type = str(value.get("type", "factual") or "factual")
+                    fact_type = str(
+                        value.get("fact_type") or value.get("type") or "factual"
+                    )
                 elif isinstance(value, str):
                     raw_text = value
                 else:

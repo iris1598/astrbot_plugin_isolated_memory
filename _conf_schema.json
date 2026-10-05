@@ -222,10 +222,9 @@
       },
       "memory_rerank_provider_id": {
         "type": "string",
-        "description": "Rerank 专用提供商 ID（可选）",
+        "description": "Rerank 提供商 ID（可选填空）",
         "default": "",
-        "_special": "select_provider",
-        "hint": "留空时自动检测并使用 AstrBot 中首个已激活的 Rerank 实例；亦可手动指定"
+        "hint": "AstrBot「服务提供商」中 Rerank 类型提供商的 ID。留空时自动检测首个已激活的 Rerank 提供商，也可在此手动填入 Provider ID（如硅基流动或本地 Rerank 的 ID）"
       },
       "memory_rerank_candidates": {
         "type": "int",
