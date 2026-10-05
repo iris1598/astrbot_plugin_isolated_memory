@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -1623,11 +1624,65 @@ class MemoryManager:
 
         return sorted(list(owners))
 
+    def _get_backup_dir(self, backup_dir: str | None = None) -> str:
+        """获取记忆备份文件的持久化存储目录。
+
+        AstrBot 官方规范：
+        插件持久化数据必须保存在 data/plugin_data/<plugin_name>/ 下（由 StarTools.get_data_dir 提供），
+        绝不能保存在 data/plugins/<plugin_name>/ 源码目录下，
+        否则在 WebUI 更新插件时，AstrBot 会完整清空并替换整个源码目录。
+        """
+        if backup_dir:
+            os.makedirs(backup_dir, exist_ok=True)
+            return backup_dir
+
+        target_dir = None
+        try:
+            from astrbot.api.star import StarTools
+            base = StarTools.get_data_dir("astrbot_plugin_isolated_memory")
+            target_dir = os.path.join(str(base), "backups")
+        except Exception:
+            pass
+
+        if not target_dir:
+            try:
+                from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+                base_data = get_astrbot_data_path()
+            except Exception:
+                base_data = "data"
+            target_dir = os.path.join(
+                base_data, "plugin_data", "astrbot_plugin_isolated_memory", "backups"
+            )
+
+        os.makedirs(target_dir, exist_ok=True)
+
+        # 兼容旧版本：自动将可能遗留在 data/plugins/ 下的历史备份文件无损平移至持久化目录
+        try:
+            try:
+                from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+                base_data = get_astrbot_data_path()
+            except Exception:
+                base_data = "data"
+            old_dir = os.path.join(
+                base_data, "plugins", "astrbot_plugin_isolated_memory", "backups"
+            )
+            if os.path.isdir(old_dir) and os.path.abspath(old_dir) != os.path.abspath(target_dir):
+                for fn in os.listdir(old_dir):
+                    if fn.endswith(".json") and fn.startswith("memory_backup_"):
+                        src = os.path.join(old_dir, fn)
+                        dst = os.path.join(target_dir, fn)
+                        if os.path.isfile(src) and not os.path.exists(dst):
+                            shutil.copy2(src, dst)
+        except Exception as e:
+            logger.debug(f"[IsolatedMemory] 迁移旧备份目录异常: {e}")
+
+        return target_dir
+
     async def backup_all_memories(self, backup_dir: str | None = None) -> dict:
         """全量备份知识库中所有用户的记忆，生成结构化 JSON 备份文件。
 
         Args:
-            backup_dir: 备份文件存放目录（默认存放在插件 data/backups 目录下）。
+            backup_dir: 备份文件存放目录（默认存放在 data/plugin_data/astrbot_plugin_isolated_memory/backups/ 目录下）。
 
         Returns:
             dict: {
@@ -1653,16 +1708,7 @@ class MemoryManager:
             }
 
         try:
-            if not backup_dir:
-                try:
-                    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-                    base_data = get_astrbot_data_path()
-                except Exception:
-                    base_data = "data"
-                backup_dir = os.path.join(
-                    base_data, "plugins", "astrbot_plugin_isolated_memory", "backups"
-                )
-            os.makedirs(backup_dir, exist_ok=True)
+            backup_dir = self._get_backup_dir(backup_dir)
 
             owners = await self.get_all_memory_owners()
             owner_data: dict[str, list[dict]] = {}
@@ -1738,15 +1784,7 @@ class MemoryManager:
 
     def list_backups(self, backup_dir: str | None = None) -> list[dict]:
         """列出已有的记忆备份文件列表（按创建时间降序）。"""
-        if not backup_dir:
-            try:
-                from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-                base_data = get_astrbot_data_path()
-            except Exception:
-                base_data = "data"
-            backup_dir = os.path.join(
-                base_data, "plugins", "astrbot_plugin_isolated_memory", "backups"
-            )
+        backup_dir = self._get_backup_dir(backup_dir)
         if not os.path.exists(backup_dir):
             return []
 
@@ -1784,21 +1822,12 @@ class MemoryManager:
             backup_identifier: 备份文件序号（如 "1" 表示最新）或文件名/路径。
             mode: "overwrite"（覆盖还原）或 "merge"（合并追加）。
             target_owner: 可选，仅恢复指定用户的记忆。
-            backup_dir: 备份目录（默认为插件 data/backups 目录）。
+            backup_dir: 备份目录（默认为 data/plugin_data/astrbot_plugin_isolated_memory/backups/）。
 
         Returns:
             dict: 恢复结果统计字典。
         """
-        if not backup_dir:
-            try:
-                from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-                base_data = get_astrbot_data_path()
-            except Exception:
-                base_data = "data"
-            backup_dir = os.path.join(
-                base_data, "plugins", "astrbot_plugin_isolated_memory", "backups"
-            )
-
+        backup_dir = self._get_backup_dir(backup_dir)
         backups = self.list_backups(backup_dir)
         target_file = None
 

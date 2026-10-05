@@ -3,10 +3,12 @@
 import asyncio
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -738,6 +740,30 @@ class TestAdminBackupAndBatchUpgrade(unittest.TestCase):
             self.assertEqual(backups[0]["file_name"], res["file_name"])
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_get_backup_dir_uses_plugin_data_and_migrates_legacy(self):
+        """测试备份目录遵循 AstrBot 规范（存放在 plugin_data，并可无损迁移旧 plugins 目录下的文件）。"""
+        mgr = make_manager()
+        with tempfile.TemporaryDirectory() as tmp_base:
+            old_plugins_dir = os.path.join(tmp_base, "plugins", "astrbot_plugin_isolated_memory", "backups")
+            expected_plugin_data_dir = os.path.join(tmp_base, "plugin_data", "astrbot_plugin_isolated_memory", "backups")
+            os.makedirs(old_plugins_dir, exist_ok=True)
+
+            legacy_file = os.path.join(old_plugins_dir, "memory_backup_20261001_100000.json")
+            with open(legacy_file, "w", encoding="utf-8") as f:
+                f.write('{"backup_version": 1}')
+
+            # 模拟 get_astrbot_data_path 返回 tmp_base
+            with unittest.mock.patch("astrbot.core.utils.astrbot_path.get_astrbot_data_path", return_value=tmp_base, create=True):
+                # 同时也 patch StarTools 抛异常以测试 base_data fallback 逻辑
+                with unittest.mock.patch("astrbot.api.star.StarTools.get_data_dir", side_effect=RuntimeError("no StarTools")):
+                    res_dir = mgr._get_backup_dir()
+                    self.assertEqual(os.path.abspath(res_dir), os.path.abspath(expected_plugin_data_dir))
+                    self.assertNotIn("data" + os.sep + "plugins", res_dir)
+                    self.assertIn("plugin_data", res_dir)
+                    # 验证旧文件被平移到新持久化目录
+                    migrated_file = os.path.join(res_dir, "memory_backup_20261001_100000.json")
+                    self.assertTrue(os.path.exists(migrated_file))
 
     def test_upgrade_all_memories(self):
         mgr = make_manager()

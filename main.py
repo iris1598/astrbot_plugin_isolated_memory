@@ -1238,7 +1238,7 @@ class Main(Star):
                 lines.append(f"{i}. {b['file_name']} ({b['file_size_kb']} KB) - {b['created_at']}")
             if len(backups) > 10:
                 lines.append(f"... 等共 {len(backups)} 个备份文件")
-            lines.append("📁 存放路径: data/plugins/astrbot_plugin_isolated_memory/backups/")
+            lines.append("📁 存放路径: data/plugin_data/astrbot_plugin_isolated_memory/backups/")
             yield event.plain_result("\n".join(lines))
             return
 
@@ -1298,7 +1298,7 @@ class Main(Star):
                 "• 恢复指定备份：/记忆恢复 <序号或文件名>",
                 "• 合并模式恢复：/记忆恢复 1 合并（默认覆盖还原）",
                 "• 恢复指定用户：/记忆恢复 1 覆盖 <umo>",
-                "📁 备份目录: data/plugins/astrbot_plugin_isolated_memory/backups/",
+                "📁 备份目录: data/plugin_data/astrbot_plugin_isolated_memory/backups/",
             ])
             yield event.plain_result("\n".join(lines))
             return
