@@ -24,7 +24,6 @@ AstrBot 官方对话体系（`ConversationManager`）与
 |------|------|----------|
 | `/会话重置`（session_reset） | 清空当前对话上下文，**存档不受影响** | 与官方 `/reset` 同语义：`update_conversation(umo, cid, [])` 就地清空 + 停止该会话运行中的 Agent + 权限场景（群聊未开隔离需管理员，alter_cmd 可覆盖）+ 第三方 runner 状态清理；同步丢弃待抽取缓冲；可联动清记忆 |
 | `/会话信息`（session_info） | 轮次/消息/估算Token/官方轮次上限与超限策略/存档数 | 当前对话 + `get_config(umo)` |
-| `/会话压缩 [保留条数]`（session_compress） | LLM 摘要压缩旧上下文，默认保留最近 5 条，0=全部 | `update_conversation`；超时/失败不改动内容 |
 | `/存档 <名称>`（session_save） | 上下文快照为命名存档，同名覆盖 | 官方多对话：`new_conversation(content,title)` 后切回原对话 |
 | `/读档 <名称>`（session_load） | 载入存档替换当前上下文 | 写入当前对话；无活跃对话时自动补建 |
 | `/存档列表`（session_slots） / `/删档 <名称>`（session_slot_delete） | 管理存档 | 按标题过滤该 UMO 的带标题对话 |
@@ -98,9 +97,6 @@ Agent 函数调用(Tool Calling)：
   严格区分各人格独立存储，且绝不动好感度数值、关系档位、禁言等其它任何数据。
 - `memory_mbti_*`：`/记忆测评` 的开关、生成方法（`anchor` 锚点比对 / `llm`）、
   锚点中性阈值、最少记忆条数、参与分析的字符上限，以及仅 `llm` 方法使用的
-  专用模型、超时与自定义提示词。留空模型则用当前会话聊天模型。
-- `compress_provider_id / compress_timeout / compress_instruction`：
-  `/会话压缩` 的模型、超时与提示词。
 - `enable_debug_log`：调试日志。
 
 ## MBTI 测评报告（xxti / /xxti）

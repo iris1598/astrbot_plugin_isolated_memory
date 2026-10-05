@@ -3,7 +3,7 @@ astrbot_plugin_isolated_memory - 随时间衰减记忆 + 会话指令（官方�
 
 从 astrbot_plugin_isolated_session v1.5.x 拆分而来：
 - 记忆系统：召回注入 / 间隔抽取 / 衰减遗忘 / 共享知识库存储；
-- 会话指令：/会话重置 /会话信息 /会话压缩 /存档 /读档 /存档列表 /删档，
+- 会话指令：/会话重置 /会话信息 /存档 /读档 /存档列表 /删档，
   后端不再使用 isolated__ 私有命名空间，直接操作 AstrBot 官方对话体系
   （ConversationManager + 当前事件 UMO）。
 
@@ -646,103 +646,9 @@ class Main(Star):
             f"超限策略: {strategy}",
             f"存档数量: {len(slots)}",
             "",
-            "/会话压缩 [保留条数]  手动压缩（默认保留 5 条，0=全部）",
             "/存档 <名称>  /读档 <名称>  /存档列表  /删档 <名称>",
         ]
         yield event.plain_result("\n".join(lines))
-
-    @filter.command("会话压缩", alias={"session_compress"})
-    async def cmd_compress(self, event: AstrMessageEvent, keep_count: int = 5):
-        """手动压缩当前对话上下文：LLM 摘要旧内容，保留最近 N 条（0=全部压缩）"""
-        if keep_count < 0:
-            yield event.plain_result(
-                "❌ 保留条数不能为负数。\n"
-                "用法: /会话压缩 [保留条数]，默认保留 5 条，0=全部压缩。"
-            )
-            return
-        umo, cid, conv = await self._current(event)
-        contexts = T.parse_history(conv)
-        if not cid or not contexts:
-            yield event.plain_result("ℹ️ 当前会话无历史内容，无需压缩。")
-            return
-        split = T.split_for_manual_compress(contexts, keep_count)
-        if split is None:
-            yield event.plain_result(
-                f"ℹ️ 最近 {keep_count} 条以内的内容无需压缩，未做修改。"
-            )
-            return
-        system_msgs, old_msgs, recent_msgs = split
-        original_count = len(contexts)
-        original_tokens = T.estimate_tokens(contexts)
-
-        status, summary = await self._call_llm_summary(old_msgs, event, umo)
-        if status == "timeout":
-            yield event.plain_result(
-                "❌ 手动压缩失败：LLM 请求超时，上下文未修改，请稍后重试。"
-            )
-            return
-        if status != "ok":
-            yield event.plain_result(
-                "❌ 手动压缩失败：LLM 出错或返回空摘要，上下文未修改，请稍后重试。"
-            )
-            return
-
-        compressed = T.assemble_compressed(system_msgs, summary, recent_msgs)
-        await self._conv_mgr.update_conversation(
-            unified_msg_origin=umo, conversation_id=cid, history=compressed
-        )
-        # 上下文被替换，旧待抽取轮次不再适用于当前对话
-        await self._clear_extract_state(umo)
-        keep_desc = (
-            f"保留最近 {keep_count} 条" if keep_count > 0 else "全部压缩（不保留消息）"
-        )
-        yield event.plain_result(
-            f"✅ 手动压缩完成\n"
-            f"{keep_desc}\n"
-            f"消息: {original_count} → {len(compressed)}\n"
-            f"Token: {original_tokens} → {T.estimate_tokens(compressed)}"
-        )
-
-    async def _call_llm_summary(
-        self, old_msgs: list[dict], event: AstrMessageEvent, umo: str
-    ) -> tuple[str, str | None]:
-        """调用 LLM 生成历史摘要：("ok", text) / ("timeout", None) / ("failed", None)。"""
-        instruction = (
-            self.config.get("compress_instruction") or T.DEFAULT_COMPRESS_INSTRUCTION
-        )
-        compress_prompt = (
-            f"{instruction}\n\nFull conversation history to summarize:\n"
-            f"{T.contexts_to_text(old_msgs)}"
-        )
-        provider_id = str(self.config.get("compress_provider_id", "") or "").strip()
-        if not provider_id:
-            try:
-                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
-            except Exception:
-                provider_id = ""
-        if not provider_id:
-            return "failed", None
-        timeout = float(self.config.get("compress_timeout", 30) or 0)
-        try:
-            coro = self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=compress_prompt,
-                session_id=f"isolated_tools_compress_{int(time.time())}",
-            )
-            resp = (
-                await asyncio.wait_for(coro, timeout=timeout) if timeout > 0
-                else await coro
-            )
-            summary = resp.completion_text.strip() if resp else ""
-            if not summary:
-                return "failed", None
-            return "ok", summary
-        except (asyncio.TimeoutError, TimeoutError):
-            logger.warning(f"[IsolatedMemory] 压缩 LLM 超时（{timeout}s）")
-            return "timeout", None
-        except Exception as e:
-            logger.error(f"[IsolatedMemory] 压缩 LLM 失败: {e}")
-            return "failed", None
 
     # ── 存档 / 读档 / 列表 / 删档 ───────────────────────────────
 
@@ -868,7 +774,6 @@ class Main(Star):
             "【会话 + 记忆 工具】（官方会话隔离后端）",
             "/会话重置             清空当前对话上下文（与官方 reset 同语义，存档不受影响）",
             "/会话信息             轮次/消息/Token/官方限制/存档数",
-            "/会话压缩 [保留条数]  手动 LLM 摘要压缩（默认保留 5 条，0=全部）",
             "/存档 <名称>  /读档 <名称>  /存档列表  /删档 <名称>",
             "—",
             "/记忆状态  /记忆查询 <内容>  /记忆添加 <内容>  /记忆升级  /记忆开关 开|关  /记忆清除",

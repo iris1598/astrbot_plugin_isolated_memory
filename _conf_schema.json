@@ -40,24 +40,6 @@
     "default": true,
     "hint": "若已安装 astrbot_plugin_favorability 插件，开启后在会话重置时将同步重置当前人格对该用户的评价（印象重置为初次见面），严格保留好感度数值、关系档位、禁言等其它所有数据。"
   },
-  "compress_provider_id": {
-    "type": "string",
-    "description": "/会话压缩 专用 LLM 模型（可选）",
-    "default": "",
-    "hint": "留空则使用当前会话的聊天模型进行压缩。填写 Provider 的完整 ID",
-    "_special": "select_provider"
-  },
-  "compress_timeout": {
-    "type": "int",
-    "description": "/会话压缩 LLM 请求超时时间（秒），0=不限制",
-    "default": 30,
-    "hint": "超时将直接报告压缩失败且不修改上下文，建议 10-60"
-  },
-  "compress_instruction": {
-    "type": "text",
-    "description": "/会话压缩 自定义提示词（留空使用默认）",
-    "default": ""
-  },
   "memory": {
     "type": "object",
     "description": "记忆系统（基于共享知识库的随时间衰减记忆）",
@@ -255,25 +237,6 @@
         "description": "参与比对的记忆文本字符上限",
         "default": 3000,
         "hint": "按最近使用时间倒序截取，超出部分不参与分析（下限 500）"
-      },
-      "memory_mbti_llm_commentary": {
-        "type": "bool",
-        "description": "是否调用大模型生成个性化共鸣评语（仅用于写评语，匹配排序由纯向量决定）",
-        "default": true,
-        "hint": "开启后在纯向量匹配确定角色后，调用 LLM 撰写 1~2 句生动的共鸣寄语；关闭后直接使用内置角色金句模版，实现零 Token 消耗"
-      },
-      "memory_mbti_provider_id": {
-        "type": "string",
-        "description": "共鸣评语专用 LLM 模型（可选）",
-        "default": "",
-        "hint": "留空则使用当前会话的聊天模型。填写 Provider 的完整 ID",
-        "_special": "select_provider"
-      },
-      "memory_mbti_timeout": {
-        "type": "int",
-        "description": "共鸣评语 LLM 请求超时时间（秒），0=不限制",
-        "default": 15,
-        "hint": "超时将自动回退内置角色模版评语，建议 10-30"
       },
       "character_match_custom_dir": {
         "type": "string",

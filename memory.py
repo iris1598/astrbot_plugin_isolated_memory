@@ -3019,11 +3019,8 @@ class MemoryManager:
 
         top_match = rankings[0]
 
-        # LLM 生成共鸣评语（仅用于写评语，匹配结果已在上文由纯向量确定）
-        commentary = await self._generate_character_commentary(
-            top_match=top_match,
-            umo=umo,
-        )
+        # 依据最匹配角色的特质与金句直接生成共鸣评语（0 Token 零开销，无需调用大模型）
+        commentary = self._default_commentary(top_match)
 
         return {
             "top_character": top_match,
@@ -3034,45 +3031,10 @@ class MemoryManager:
             "truncated": truncated,
         }
 
-    async def _generate_character_commentary(
+    def _generate_character_commentary(
         self, top_match: dict, umo: str = ""
     ) -> str:
-        """调用 LLM 生成 1~2 句角色共鸣评语；失败或关闭时回退内置模版。"""
-        enable_llm = bool(self._cfg("memory_mbti_llm_commentary", True))
-        if not enable_llm:
-            return self._default_commentary(top_match)
-
-        char_name = top_match.get("name", "")
-        char_title = top_match.get("title", "")
-        char_tags = "、".join(top_match.get("tags", []))
-        char_tagline = top_match.get("tagline", "")
-        evidence = _clip_text(top_match.get("evidence", ""), 60)
-
-        prompt = (
-            f"你是鸣潮频率共振诊断仪。经记忆向量测算，用户与鸣潮角色【{char_name}】共鸣度最高。\n"
-            f"角色称号：{char_title}\n"
-            f"角色性格特质：{char_tags}\n"
-            f"角色代表台词：{char_tagline}\n"
-            f"最契合的用户记忆：{evidence}\n\n"
-            "请结合该角色的性格特质与上述记忆依据，写一段 1~2 句话（不超过 70 字）的共鸣解析与寄语。\n"
-            "要求：语气温和细腻、体现心智共振与同调感，直接输出寄语正文，不要输出标题、前缀、Markdown代码块或解释。"
-        )
-
-        timeout = float(self._cfg("memory_mbti_timeout", 15) or 15)
-        provider_id = self._mbti_provider_id()
-        try:
-            result = await self._llm_chat(
-                prompt=prompt,
-                provider_id=provider_id,
-                timeout=timeout,
-                umo=umo,
-            )
-            if result and len(result.strip()) > 5:
-                cleaned = result.strip().strip('"').strip("“").strip("”")
-                return cleaned
-        except Exception as e:
-            logger.debug(f"[IsolatedMemory] 生成角色共鸣评语失败: {e}")
-
+        """生成角色共鸣评语（直接采用内置模版，免调用大模型，0 Token 开销）。"""
         return self._default_commentary(top_match)
 
     @staticmethod

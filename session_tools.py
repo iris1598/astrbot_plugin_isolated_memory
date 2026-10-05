@@ -19,14 +19,6 @@ from typing import Any
 # ── 存档名称规则：中英文、数字、下划线、短横线，1-20 个字符 ──
 SLOT_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\u4e00-\u9fff]{1,20}$")
 
-# ── 默认 LLM 压缩提示词（与 AstrBot 默认值一致） ──
-DEFAULT_COMPRESS_INSTRUCTION = (
-    "Based on our full conversation history, produce a concise summary "
-    "of the key topics, context, and important details discussed. "
-    "The summary should capture all essential information needed to continue "
-    "the conversation coherently."
-)
-
 
 def estimate_text_tokens(text: str) -> int:
     chinese = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
@@ -67,55 +59,6 @@ def group_into_turns(messages: list[dict]) -> list[list[dict]]:
     if current:
         turns.append(current)
     return turns
-
-
-def build_summary_pair(summary: str) -> list[dict]:
-    """构建「摘要 user + 确认 assistant」消息对。"""
-    return [
-        {"role": "user", "content": f"我们的历史对话摘要:\n{summary}"},
-        {"role": "assistant", "content": "已确认理解之前的对话内容。"},
-    ]
-
-
-def contexts_to_text(messages: list[dict]) -> str:
-    """OpenAI 格式上下文集 → 纯文本（供 LLM 压缩）。"""
-    lines: list[str] = []
-    for msg in messages:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            lines.append(f"[{role}]: {content}")
-        elif isinstance(content, list):
-            texts = [
-                p.get("text", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "text"
-            ]
-            lines.append(f"[{role}]: {' '.join(texts)}")
-    return "\n".join(lines)
-
-
-def split_for_manual_compress(
-    contexts: list[dict], keep_count: int
-) -> tuple[list[dict], list[dict], list[dict]] | None:
-    """手动压缩切分：返回 (system, old_msgs, recent_msgs)；无需压缩返回 None。
-
-    keep_count=0 表示全部压缩（不保留任何非 system 消息）。
-    """
-    keep_count = max(0, int(keep_count))
-    system_msgs = [m for m in contexts if m.get("role") == "system"]
-    non_system = [m for m in contexts if m.get("role") != "system"]
-    if not non_system or keep_count >= len(non_system):
-        return None
-    if keep_count > 0:
-        return system_msgs, non_system[:-keep_count], non_system[-keep_count:]
-    return system_msgs, non_system, []
-
-
-def assemble_compressed(
-    system_msgs: list[dict], summary: str, recent_msgs: list[dict]
-) -> list[dict]:
-    return list(system_msgs) + build_summary_pair(summary) + list(recent_msgs)
 
 
 def parse_history(conv: Any) -> list[dict]:

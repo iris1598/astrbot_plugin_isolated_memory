@@ -85,7 +85,6 @@ quotes:
             "memory": {
                 "memory_enabled": True,
                 "memory_kb_name": ["mock_kb"],
-                "memory_mbti_llm_commentary": False,  # 关闭 LLM，确保纯向量+模版评语
             }
         }
         mgr = MemoryManager(context, config)

@@ -112,37 +112,6 @@ class TestPureLogic(unittest.TestCase):
         self.assertEqual(len(turns), 1)
         self.assertEqual(len(turns[0]), 4)
 
-    def test_split_manual_compress(self):
-        sysm, old, recent = T.split_for_manual_compress(MSGS, 2)
-        self.assertEqual(len(sysm), 1)
-        self.assertEqual([m["content"] for m in old], ["一", "二"])
-        self.assertEqual([m["content"] for m in recent], ["三", "四"])
-        # keep >= len(non_system) → None
-        self.assertIsNone(T.split_for_manual_compress(MSGS, 4))
-        self.assertIsNone(T.split_for_manual_compress(MSGS, 99))
-        # keep=0 → 全部压缩
-        sysm, old, recent = T.split_for_manual_compress(MSGS, 0)
-        self.assertEqual(len(old), 4)
-        self.assertEqual(recent, [])
-        # 空输入
-        self.assertIsNone(T.split_for_manual_compress([], 5))
-
-    def test_assemble(self):
-        out = T.assemble_compressed([MSGS[0]], "摘要文本", MSGS[3:])
-        self.assertEqual(out[0]["role"], "system")
-        self.assertIn("摘要", out[1]["content"])
-        self.assertEqual(out[2]["content"], "已确认理解之前的对话内容。")
-        self.assertEqual(len(out), 5)
-
-    def test_contexts_to_text_multimodal(self):
-        msgs = [
-            {"role": "user", "content": [{"type": "text", "text": "你好"},
-                                         {"type": "image_url"}]},
-            {"role": "assistant", "content": "呀"},
-        ]
-        text = T.contexts_to_text(msgs)
-        self.assertEqual(text, "[user]: 你好\n[assistant]: 呀")
-
     def test_slot_name_rules(self):
         for ok in ["a", "存档一", "slot_1", "S-2", "0", "二十个字符二十个字符二十个字符二十个字符"]:
             self.assertTrue(T.SLOT_NAME_RE.match(ok), ok)
