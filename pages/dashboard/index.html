@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title data-i18n="page.title">IsolatedMemory 控制台</title>
+    <script src="./appearance.js"></script>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./art-direction.css" />
+    <link rel="stylesheet" href="./themes.css" />
+    <link rel="stylesheet" href="./workflows.css" />
+    <script src="./vendor/lucide.min.js"></script>
+    <script src="./i18n.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-brand" aria-label="IsolatedMemory">
+          <span class="brand-mark">IM</span>
+          <span class="brand-name"><strong>Isolated</strong><strong>Memory</strong></span>
+        </div>
+        <div class="sidebar-coordinate" aria-hidden="true">ISOLATED / 01</div>
+        <nav class="sidebar-nav">
+          <button class="nav-item active" data-page="memory" data-i18n-aria="nav.memory">
+            <i data-lucide="database" aria-hidden="true"></i>
+            <span data-i18n="nav.memory">记忆管理</span>
+          </button>
+          <button class="nav-item" data-page="recall" data-i18n-aria="nav.recall">
+            <i data-lucide="scan-search" aria-hidden="true"></i>
+            <span data-i18n="nav.recall">检索测试</span>
+          </button>
+          <button class="nav-item" data-page="system" data-i18n-aria="nav.system">
+            <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
+            <span data-i18n="nav.system">系统概览</span>
+          </button>
+        </nav>
+        <div class="sidebar-divider"></div>
+        <div class="sidebar-footer">
+          <button class="nav-item" id="theme-toggle" data-i18n-aria="header.theme" aria-haspopup="dialog" aria-controls="appearance-dialog">
+            <i data-lucide="palette" aria-hidden="true"></i>
+            <span data-i18n="header.theme">主题</span>
+          </button>
+          <details class="lang-menu" id="lang-menu">
+            <summary class="nav-item" id="lang-toggle" data-i18n-aria="header.lang">
+              <i data-lucide="languages" aria-hidden="true"></i>
+              <span id="lang-label" data-i18n="header.lang">语言</span>
+            </summary>
+            <div class="lang-options">
+              <button type="button" class="lang-option" data-lang="zh">中文</button>
+              <button type="button" class="lang-option" data-lang="en">English</button>
+            </div>
+          </details>
+        </div>
+      </aside>
+
+      <!-- Main Content -->
+      <main class="main-content">
+
+        <!-- Page 01: Memory -->
+        <section class="page active" id="page-memory">
+          <header class="page-header">
+            <div class="page-heading">
+              <span class="page-index">01</span>
+              <span class="page-title" data-i18n="nav.memory">记忆管理</span>
+            </div>
+            <button id="mem-refresh" class="btn btn-secondary btn-sm">
+              <i data-lucide="refresh-cw" aria-hidden="true"></i>
+              <span data-i18n="common.refresh">刷新</span>
+            </button>
+          </header>
+          <div class="page-body memory-page-body">
+            <form class="filter-bar" id="memory-filters">
+              <input type="text" id="mem-keyword" class="input" data-i18n-placeholder="filter.keyword" placeholder="按关键词或文档 ID 搜索…" />
+              <input type="text" id="mem-session" class="input" data-i18n-placeholder="filter.sessionId" placeholder="用户 / 会话 UMO (如 12345)" style="max-width:220px" />
+              <select id="mem-type" class="select input">
+                <option value="all" data-i18n="filter.typeAll">全部类型</option>
+                <option value="factual" data-i18n="type.factual">事实 (Factual)</option>
+                <option value="preference" data-i18n="type.preference">偏好 (Preference)</option>
+                <option value="episodic" data-i18n="type.episodic">事件 (Episodic)</option>
+                <option value="planned" data-i18n="type.planned">计划 (Planned)</option>
+                <option value="general" data-i18n="type.general">通用 (General)</option>
+              </select>
+              <select id="mem-sort" class="select input">
+                <option value="created_desc" data-i18n="sort.createdDesc">最新创建</option>
+                <option value="created_asc" data-i18n="sort.createdAsc">最早创建</option>
+                <option value="updated_desc" data-i18n="sort.updatedDesc">最近更新</option>
+                <option value="importance_desc" data-i18n="sort.importanceDesc">重要度高到低</option>
+                <option value="importance_asc" data-i18n="sort.importanceAsc">重要度低到高</option>
+              </select>
+              <button type="submit" class="btn btn-primary btn-sm" data-i18n="filter.apply">筛选</button>
+              <button type="button" id="mem-reset-filters" class="btn btn-secondary btn-sm" data-i18n="flow.resetFilters">重置</button>
+            </form>
+
+            <details class="memory-transfer" id="memory-transfer">
+              <summary data-i18n="flow.transfer">导入与导出</summary>
+              <div class="transfer-sections">
+                <section>
+                  <h3 style="font-size:14px;font-weight:600">导出数据</h3>
+                  <p id="mem-export-scope" data-i18n="flow.exportAll">导出全部记忆，或勾选指定记忆进行导出。</p>
+                  <div class="transfer-controls">
+                    <select id="mem-transfer-format" class="select input" style="width:auto">
+                      <option value="json">JSON</option>
+                      <option value="csv">CSV</option>
+                    </select>
+                    <button class="btn btn-sm btn-secondary" id="mem-export">
+                      <i data-lucide="download" aria-hidden="true"></i>
+                      <span>导出</span>
+                    </button>
+                  </div>
+                </section>
+                <section>
+                  <h3 style="font-size:14px;font-weight:600">导入数据</h3>
+                  <p data-i18n="flow.importSteps">选择 JSON 或 CSV 文件后确认导入。</p>
+                  <div class="transfer-controls">
+                    <button class="btn btn-sm btn-secondary" id="mem-import">
+                      <i data-lucide="upload" aria-hidden="true"></i>
+                      <span>导入文件</span>
+                    </button>
+                  </div>
+                  <input type="file" id="mem-import-file" accept=".json,.csv,application/json,text/csv" hidden />
+                </section>
+              </div>
+            </details>
+
+            <div class="memory-selection" id="memory-selection" hidden>
+              <span id="mem-selection-count" role="status">已选择 0 条</span>
+              <button type="button" class="btn btn-sm btn-secondary" id="mem-clear-selection" data-i18n="flow.clearSelection">取消选择</button>
+              <button class="btn btn-sm btn-danger" id="mem-delete-selected" disabled>
+                <i data-lucide="trash-2" aria-hidden="true"></i>
+                <span id="mem-delete-selected-label">删除所选项</span>
+              </button>
+            </div>
+
+            <div class="table-container">
+              <div id="memory-feedback" class="request-feedback" role="status" aria-live="polite" hidden>
+                <span id="memory-feedback-message"></span>
+              </div>
+              <div class="table-scroll" id="memories-scroll">
+                <table class="data-table" id="memories-table">
+                  <thead>
+                    <tr>
+                      <th class="cell-select"><input type="checkbox" id="mem-select-all" aria-label="全选" /></th>
+                      <th class="cell-id">ID</th>
+                      <th class="cell-owner">归属用户 (UMO)</th>
+                      <th class="cell-summary">记忆内容</th>
+                      <th class="cell-type">类型</th>
+                      <th class="cell-importance">重要度</th>
+                      <th class="cell-created">创建时间</th>
+                    </tr>
+                  </thead>
+                  <tbody id="memories-body">
+                    <tr><td colspan="7" class="table-empty" data-i18n="common.noData">暂无数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="pagination">
+                <label class="pagination-size">
+                  <span data-i18n="common.perPage">每页</span>
+                  <select id="mem-page-size" class="select input" style="width:auto">
+                    <option value="20" data-i18n="common.perPage20">20 条/页</option>
+                    <option value="50" data-i18n="common.perPage50">50 条/页</option>
+                    <option value="100" data-i18n="common.perPage100">100 条/页</option>
+                  </select>
+                </label>
+                <div class="pagination-controls">
+                  <button class="btn btn-sm btn-ghost" id="mem-prev" disabled>
+                    <i data-lucide="arrow-left" aria-hidden="true"></i>
+                    <span>上一页</span>
+                  </button>
+                  <span class="pagination-info" id="mem-pagination-info">第 1/1 页 · 共 0 条</span>
+                  <button class="btn btn-sm btn-ghost" id="mem-next" disabled>
+                    <span>下一页</span>
+                    <i data-lucide="arrow-right" aria-hidden="true"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page 02: Recall Test -->
+        <section class="page" id="page-recall">
+          <header class="page-header">
+            <div class="page-heading">
+              <span class="page-index">02</span>
+              <span class="page-title" data-i18n="nav.recall">检索测试</span>
+            </div>
+          </header>
+          <div class="page-body">
+            <div class="recall-form-section">
+              <textarea id="recall-query" class="input textarea" rows="3" data-i18n-placeholder="recall.queryPh" placeholder="输入查询语句以测试记忆混合检索与衰减打分…"></textarea>
+              <div class="recall-form-row">
+                <div class="recall-form-field" style="max-width:200px">
+                  <label for="recall-k" class="recall-form-label" data-i18n="recall.kLabel">召回数量 (k)</label>
+                  <div class="slider-group">
+                    <input type="range" id="recall-k" min="1" max="50" value="5" />
+                    <span class="slider-value" id="recall-k-value">5</span>
+                  </div>
+                </div>
+                <div class="recall-form-field" style="max-width:280px">
+                  <label for="recall-session" class="recall-form-label">归属用户 UMO (可选)</label>
+                  <input type="text" id="recall-session" class="input input-sm" data-i18n-placeholder="recall.sessionPh" placeholder="指定用户 / 会话 UMO (可选)" />
+                </div>
+                <button class="btn btn-primary" id="recall-search-btn">
+                  <i data-lucide="scan-search" aria-hidden="true"></i>
+                  <span data-i18n="recall.searchBtn">执行检索</span>
+                </button>
+              </div>
+            </div>
+            <p class="workflow-hint">快捷键：Ctrl / Cmd + Enter 直接执行检索。</p>
+            <div class="recall-results-header hidden" id="recall-stats">
+              <span id="recall-count-text">0 条结果</span>
+              <span class="text-tertiary" id="recall-time-text"></span>
+            </div>
+            <div id="recall-feedback" class="request-feedback" role="status" aria-live="polite" hidden></div>
+            <div id="recall-results" aria-busy="false"></div>
+          </div>
+        </section>
+
+        <!-- Page 03: System Overview -->
+        <section class="page" id="page-system">
+          <header class="page-header">
+            <div class="page-heading">
+              <span class="page-index">03</span>
+              <span class="page-title" data-i18n="nav.system">系统概览</span>
+            </div>
+          </header>
+          <div class="page-body">
+            <div class="stat-cards" id="system-stat-cards">
+              <div class="stat-card">
+                <div class="stat-card-value" id="ss-total">--</div>
+                <div class="stat-card-label" data-i18n="stats.total">记忆总数</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-value" id="ss-active">--</div>
+                <div class="stat-card-label" data-i18n="stats.active">活跃记忆</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-value" id="ss-sessions">--</div>
+                <div class="stat-card-label">独立用户 / 会话</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-value" id="ss-avg-imp">--</div>
+                <div class="stat-card-label">平均重要度</div>
+              </div>
+            </div>
+
+            <div class="system-grid">
+              <div class="system-panel">
+                <div class="system-panel-title" data-i18n="system.importanceDistribution">重要度分布 (0-10)</div>
+                <div class="bar-chart" id="importance-chart"></div>
+              </div>
+              <div class="system-panel">
+                <div class="system-panel-title" data-i18n="system.factTypes">事实类型分布</div>
+                <div class="bar-chart" id="atom-chart"></div>
+              </div>
+            </div>
+
+            <div class="system-panel mb-6" style="margin-top:0">
+              <div class="system-panel-title" data-i18n="system.activeSessions">活跃用户 / 会话列表</div>
+              <div class="session-list" id="session-list"></div>
+            </div>
+
+            <div class="system-panel mb-6">
+              <div class="system-panel-title" data-i18n="system.consolidationTitle">记忆衰减与一键升级</div>
+              <div class="consolidation-meta" id="consolidation-meta"></div>
+              <div style="margin-top:12px; display:flex; align-items:center; gap:12px">
+                <button class="btn btn-primary btn-sm" id="cons-run-btn">
+                  <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                  <span data-i18n="system.consolidationRun">一键升级全部记忆</span>
+                </button>
+                <span class="text-tertiary" id="cons-run-result" style="font-size:12px"></span>
+              </div>
+            </div>
+
+            <div class="system-panel">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px">
+                <div class="system-panel-title" data-i18n="system.versionBackups" style="margin:0">版本备份管理</div>
+                <button class="btn btn-sm btn-secondary" id="btn-create-backup">
+                  <i data-lucide="archive" aria-hidden="true"></i>
+                  <span>立即创建备份</span>
+                </button>
+              </div>
+              <div class="backup-list" id="backup-list"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Peek Panel (Drawer) -->
+    <div class="peek-overlay" id="peek-overlay"></div>
+    <aside class="peek-panel" id="peek-panel" aria-hidden="true" inert>
+      <div class="peek-header">
+        <div>
+          <div id="peek-badge"></div>
+          <div class="peek-title" id="peek-title">--</div>
+        </div>
+        <button class="peek-close" id="peek-close" data-i18n-title="common.close" aria-label="Close">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="peek-body" id="peek-body"></div>
+    </aside>
+
+    <!-- Discard Dialog -->
+    <dialog id="discard-dialog" class="discard-dialog" aria-labelledby="discard-title" aria-describedby="discard-message">
+      <form method="dialog">
+        <h2 id="discard-title" data-i18n="flow.unsavedTitle">有未保存的修改</h2>
+        <p id="discard-message" data-i18n="flow.unsavedMessage">离开会丢失当前修改，确定放弃吗？</p>
+        <div class="discard-actions">
+          <button class="btn btn-secondary" value="cancel" autofocus data-i18n="flow.keepEditing">继续编辑</button>
+          <button class="btn btn-danger" value="discard" data-i18n="flow.discard">放弃修改</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Confirm Dialog -->
+    <dialog id="confirm-dialog" class="discard-dialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-message">
+      <form method="dialog">
+        <h2 id="confirm-dialog-title">确认操作</h2>
+        <p id="confirm-dialog-message" style="white-space: pre-line; margin-bottom: 24px;"></p>
+        <div class="discard-actions">
+          <button class="btn btn-secondary" id="confirm-dialog-cancel" value="cancel" autofocus>取消</button>
+          <button class="btn btn-danger" id="confirm-dialog-ok" value="confirm">确定</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Appearance Preferences Dialog -->
+    <dialog id="appearance-dialog" class="appearance-dialog" aria-labelledby="appearance-title" aria-describedby="appearance-hint">
+      <form method="dialog">
+        <header class="appearance-header">
+          <h2 id="appearance-title" data-i18n="header.theme">外观设置</h2>
+          <button class="btn btn-ghost btn-sm" data-i18n-aria="common.close" autofocus><i data-lucide="x" aria-hidden="true"></i></button>
+        </header>
+        <p id="appearance-hint" data-i18n="appearance.hint">选择即刻生效；偏好保存在当前浏览器中。</p>
+        <fieldset>
+          <legend data-i18n="appearance.style">视觉风格</legend>
+          <div class="appearance-styles">
+            <label class="appearance-card">
+              <input type="radio" name="appearance-style" value="editorial" />
+              <span class="appearance-preview preview-editorial" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
+              <strong data-i18n="appearance.editorial">Editorial · 原野</strong>
+              <span class="appearance-description">经典网格 · 醒目标题 · 利落线条</span>
+            </label>
+            <label class="appearance-card">
+              <input type="radio" name="appearance-style" value="studio" />
+              <span class="appearance-preview preview-studio" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
+              <strong data-i18n="appearance.studio">Studio · 轻盈</strong>
+              <span class="appearance-description">柔和圆角 · 蓝紫色调 · 悬浮卡片</span>
+            </label>
+            <label class="appearance-card">
+              <input type="radio" name="appearance-style" value="paper" />
+              <span class="appearance-preview preview-paper" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
+              <strong data-i18n="appearance.paper">Paper · 书页</strong>
+              <span class="appearance-description">暖纸色调 · 衬线标题 · 阅读留白</span>
+            </label>
+            <label class="appearance-card">
+              <input type="radio" name="appearance-style" value="terminal" />
+              <span class="appearance-preview preview-terminal" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
+              <strong data-i18n="appearance.terminal">Terminal · 终端</strong>
+              <span class="appearance-description">等宽字体 · 硬朗边框 · 仪表布局</span>
+            </label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend data-i18n="appearance.mode">明暗模式</legend>
+          <div class="appearance-modes">
+            <label><input type="radio" name="appearance-mode" value="system" /><span data-i18n="appearance.system">自动</span></label>
+            <label><input type="radio" name="appearance-mode" value="light" /><span data-i18n="appearance.light">浅色</span></label>
+            <label><input type="radio" name="appearance-mode" value="dark" /><span data-i18n="appearance.dark">深色</span></label>
+          </div>
+          <p class="appearance-mode-hint" data-i18n="appearance.systemHint">自动模式跟随 AstrBot；独立打开时跟随设备。</p>
+        </fieldset>
+        <footer class="appearance-footer"><button class="btn btn-primary" data-i18n="common.close">完成</button></footer>
+      </form>
+    </dialog>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

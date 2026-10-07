@@ -67,6 +67,23 @@ class Main(Star):
         # 惰性自愈：上次初始化尝试时间与失败原因（配置改后无需重启）
         self._last_init_try: float = 0.0
         self._init_reason: str = ""
+        self.page_api = None
+        self._register_page_api_if_available()
+
+    def _register_page_api_if_available(self) -> None:
+        """注册官方插件管理页面 API。"""
+        if not hasattr(self.context, "register_web_api"):
+            return
+        try:
+            from .page_api import PluginPageApi
+            self.page_api = PluginPageApi(self)
+            self.page_api.register_routes()
+        except Exception as exc:
+            self.page_api = None
+            logger.warning(
+                f"[IsolatedMemory] 注册官方管理页面 API 失败: {exc}",
+                exc_info=True,
+            )
 
     # ── 初始化 ──────────────────────────────────────────────────
 
