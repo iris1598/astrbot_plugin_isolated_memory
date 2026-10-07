@@ -264,14 +264,28 @@
             </div>
 
             <div class="system-panel mb-6">
-              <div class="system-panel-title" data-i18n="system.consolidationTitle">记忆衰减与一键升级</div>
+              <div class="system-panel-title">记忆库自动整理与衰减状态</div>
               <div class="consolidation-meta" id="consolidation-meta"></div>
               <div style="margin-top:12px; display:flex; align-items:center; gap:12px">
                 <button class="btn btn-primary btn-sm" id="cons-run-btn">
-                  <i data-lucide="refresh-cw" aria-hidden="true"></i>
-                  <span data-i18n="system.consolidationRun">一键升级全部记忆</span>
+                  <i data-lucide="sparkles" aria-hidden="true"></i>
+                  <span>立即执行记忆整理</span>
                 </button>
                 <span class="text-tertiary" id="cons-run-result" style="font-size:12px"></span>
+              </div>
+            </div>
+
+            <div class="system-panel mb-6">
+              <div class="system-panel-title">旧版记忆格式一键升级</div>
+              <div style="font-size:13px;color:var(--text-secondary,#555);margin-bottom:10px">
+                对存量旧版纯文本记忆执行结构化（提取事实类型与重要度），升级前会自动创建安全备份。
+              </div>
+              <div style="display:flex; align-items:center; gap:12px">
+                <button class="btn btn-secondary btn-sm" id="upgrade-run-btn">
+                  <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                  <span>一键升级全部旧记忆</span>
+                </button>
+                <span class="text-tertiary" id="upgrade-run-result" style="font-size:12px"></span>
               </div>
             </div>
 

@@ -197,6 +197,14 @@ class TestPageApi(unittest.TestCase):
         self.memory_mgr._dup_threshold.return_value = 0.9
         self.memory_mgr._protect_important.return_value = True
         self.memory_mgr._consolidate_enabled.return_value = False
+        self.memory_mgr._consolidation_enabled.return_value = True
+        self.memory_mgr._consolidation_min_age_days.return_value = 7
+        self.memory_mgr._consolidation_max_importance.return_value = 0.5
+        self.memory_mgr._consolidation_min_group_size.return_value = 3
+        self.memory_mgr._consolidation_max_groups.return_value = 5
+        self.memory_mgr.consolidate_memories = mock.AsyncMock(
+            return_value={"groups": 1, "merged": 3, "new_memories": 1, "deleted": 3}
+        )
         self.memory_mgr._rerank_enabled.return_value = False
         self.memory_mgr._rerank_provider_id.return_value = ""
         self.memory_mgr.list_backups.return_value = [
@@ -251,6 +259,7 @@ class TestPageApi(unittest.TestCase):
         self.assertIn(f"{PAGE_API_PREFIX}/backups/restore", routes)
         self.assertIn(f"{PAGE_API_PREFIX}/backups/delete", routes)
         self.assertIn(f"{PAGE_API_PREFIX}/consolidation/status", routes)
+        self.assertIn(f"{PAGE_API_PREFIX}/consolidation/run", routes)
         self.assertIn(f"{PAGE_API_PREFIX}/upgrade/run", routes)
 
     def test_get_stats(self):
@@ -415,11 +424,21 @@ class TestPageApi(unittest.TestCase):
             self.assertFalse(os.path.exists(test_file))
 
     def test_consolidation_and_upgrade(self):
-        """测试整合状态与一键升级。"""
+        """测试整合状态、立即整理与一键升级。"""
         res = run(self.page_api.get_consolidation_status())
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["data"]["half_life_days"], 30.0)
+        self.assertTrue(res["data"]["enabled"])
+        self.assertEqual(res["data"]["min_age_days"], 7)
+        self.assertEqual(res["data"]["max_importance"], 0.5)
 
+        # 测试立即整理
+        res_cons = run(self.page_api.run_consolidation())
+        self.assertEqual(res_cons["status"], "ok")
+        self.assertEqual(res_cons["data"]["groups"], 1)
+        self.assertEqual(res_cons["data"]["merged"], 3)
+
+        # 测试一键升级
         res = run(self.page_api.run_upgrade())
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["data"]["memories_upgraded"], 2)

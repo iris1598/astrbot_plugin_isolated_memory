@@ -138,6 +138,7 @@ class PluginPageApi:
             (f"{PAGE_API_PREFIX}/backups/restore", self.restore_backup, ["POST"], "IsolatedMemory 恢复备份"),
             (f"{PAGE_API_PREFIX}/backups/delete", self.delete_backup, ["POST"], "IsolatedMemory 删除备份"),
             (f"{PAGE_API_PREFIX}/consolidation/status", self.get_consolidation_status, ["GET"], "IsolatedMemory 整合配置与状态"),
+            (f"{PAGE_API_PREFIX}/consolidation/run", self.run_consolidation, ["POST"], "IsolatedMemory 立即执行记忆整理"),
             (f"{PAGE_API_PREFIX}/upgrade/run", self.run_upgrade, ["POST"], "IsolatedMemory 一键升级全部记忆"),
         ]
 
@@ -793,9 +794,9 @@ class PluginPageApi:
         mgr, _ = ready
 
         body = await _get_request_json()
-        filename = str(body.get("filename") or "").strip()
-        if not filename:
-            return _error("缺少备份文件名 filename")
+        filename = str(body.get("filename") or body.get("file_name") or "").strip()
+        if not filename or filename == "--":
+            return _error("缺少有效的备份文件名 filename")
 
         try:
             res = await mgr.restore_memories_from_backup(filename)
@@ -812,14 +813,14 @@ class PluginPageApi:
         mgr, _ = ready
 
         body = await _get_request_json()
-        filename = str(body.get("filename") or "").strip()
-        if not filename:
-            return _error("缺少备份文件名 filename")
+        filename = str(body.get("filename") or body.get("file_name") or "").strip()
+        if not filename or filename == "--":
+            return _error("缺少有效的备份文件名 filename")
 
         try:
             base_name = os.path.basename(filename)
-            if not base_name.endswith(".json"):
-                return _error("非法备份文件名")
+            if not base_name.endswith(".json") or base_name == "--":
+                return _error(f"非法备份文件名: {base_name}（必须为 .json 格式）")
 
             backup_dir = mgr._get_backup_dir()
             file_path = os.path.join(backup_dir, base_name)
@@ -827,7 +828,7 @@ class PluginPageApi:
                 return _error(f"备份文件不存在: {base_name}")
 
             os.remove(file_path)
-            return _ok({"deleted": True, "filename": base_name})
+            return _ok({"deleted": True, "filename": base_name, "file_name": base_name})
         except Exception as exc:
             logger.error(f"[IsolatedMemory PageAPI] 删除备份失败: {exc}", exc_info=True)
             return _error(str(exc))
@@ -841,12 +842,17 @@ class PluginPageApi:
 
         try:
             data = {
+                "enabled": mgr._consolidation_enabled(),
+                "min_age_days": mgr._consolidation_min_age_days(),
+                "max_importance": mgr._consolidation_max_importance(),
+                "min_group_size": mgr._consolidation_min_group_size(),
+                "max_groups": mgr._consolidation_max_groups(),
                 "half_life_days": mgr._half_life_days(),
                 "ttl_days": mgr._ttl_days(),
                 "max_docs": mgr._max_docs(),
                 "dup_threshold": mgr._dup_threshold(),
                 "protect_important": mgr._protect_important(),
-                "consolidate_enabled": mgr._consolidate_enabled(),
+                "consolidate_enabled": mgr._consolidation_enabled(),
                 "rerank_enabled": mgr._rerank_enabled(),
                 "rerank_provider_id": mgr._rerank_provider_id(),
             }
@@ -854,6 +860,21 @@ class PluginPageApi:
         except Exception as exc:
             logger.error(f"[IsolatedMemory PageAPI] 获取整合配置失败: {exc}", exc_info=True)
             return _error(str(exc))
+
+    async def run_consolidation(self) -> dict[str, Any]:
+        """手动触发记忆库自动整理。"""
+        ready, err = await self._ensure_memory_manager()
+        if err:
+            return err
+        mgr, _ = ready
+
+        try:
+            res = await mgr.consolidate_memories(force=True)
+            return _ok(res)
+        except Exception as exc:
+            logger.error(f"[IsolatedMemory PageAPI] 记忆整理失败: {exc}", exc_info=True)
+            return _error(str(exc))
+
 
     async def run_upgrade(self) -> dict[str, Any]:
         """一键升级所有用户的旧格式记忆。"""

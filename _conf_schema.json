@@ -154,11 +154,35 @@
         "default": 60,
         "hint": "清扫删除超过 TTL 的记忆并按上限裁剪；0=每次请求都清扫"
       },
-      "memory_consolidate_enabled": {
+      "memory_consolidation_enabled": {
         "type": "bool",
-        "description": "遗忘前巩固（可选）：过期记忆先由 LLM 折叠为长期摘要再删除",
+        "description": "启用记忆库自动整理",
         "default": false,
-        "hint": "开启后清扫时会额外消耗一次 LLM 调用"
+        "hint": "定期把同一用户零散的低价值碎片记忆聚合、整理、总结为更精炼的长期记忆，从源头控制记忆库规模"
+      },
+      "memory_consolidation_min_age_days": {
+        "type": "int",
+        "description": "整理最小记忆年龄（天）",
+        "default": 7,
+        "hint": "只整理创建时间早于该天数的记忆，避免整合近期仍在更新活跃的对话记录"
+      },
+      "memory_consolidation_max_importance": {
+        "type": "float",
+        "description": "整理最大重要度阈值",
+        "default": 0.5,
+        "hint": "只整理重要度低于该值的低权重碎片记忆，高重要度记忆保持不变"
+      },
+      "memory_consolidation_min_group_size": {
+        "type": "int",
+        "description": "每组最少记忆条数",
+        "default": 3,
+        "hint": "单用户内待整理碎片达到该数量时才触发聚合，避免琐碎的 LLM 调用"
+      },
+      "memory_consolidation_max_groups_per_run": {
+        "type": "int",
+        "description": "单次最多整理组数",
+        "default": 5,
+        "hint": "限制单次执行整理的组数，避免一次性消耗过多 LLM Token"
       },
       "memory_mmr_enabled": {
         "type": "bool",

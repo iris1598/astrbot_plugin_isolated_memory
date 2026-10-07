@@ -33,8 +33,13 @@ export class SystemPage {
       this.handleCreateBackup();
     });
 
-    // 一键升级所有用户记忆
+    // 立即执行记忆整理
     document.getElementById("cons-run-btn")?.addEventListener("click", () => {
+      this.handleRunConsolidation();
+    });
+
+    // 一键升级旧版记忆
+    document.getElementById("upgrade-run-btn")?.addEventListener("click", () => {
       this.handleRunUpgrade();
     });
   }
@@ -178,15 +183,15 @@ export class SystemPage {
 
     let html = "";
     backups.forEach((b) => {
-      const filename = b.filename || b.name || "--";
+      const filename = b.filename || b.file_name || b.name || "";
       const timeStr = b.created_at || b.timestamp || "--";
-      const totalMem = b.total_memories != null ? b.total_memories : "--";
-      const totalUsers = b.total_users != null ? b.total_users : "--";
-      const sizeStr = b.size_bytes ? `${(b.size_bytes / 1024).toFixed(1)} KB` : "";
+      const totalMem = b.total_memories != null ? b.total_memories : (b.total_chunks != null ? b.total_chunks : "--");
+      const totalUsers = b.total_users != null ? b.total_users : (b.total_owners != null ? b.total_owners : (b.owners_count != null ? b.owners_count : "--"));
+      const sizeStr = b.file_size_kb != null ? `${b.file_size_kb} KB` : (b.size_bytes ? `${(b.size_bytes / 1024).toFixed(1)} KB` : "");
 
       html += '<div class="backup-item" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border:1px solid var(--border-color,#eee);border-radius:6px;margin-bottom:8px">';
       html += '<div>';
-      html += '<div style="font-weight:600;font-size:13px;font-family:monospace">' + esc(filename) + '</div>';
+      html += '<div style="font-weight:600;font-size:13px;font-family:monospace">' + esc(filename || "--") + '</div>';
       html += '<div style="font-size:12px;color:var(--text-tertiary,#888);margin-top:2px">';
       html += '<span>' + esc(timeStr) + '</span>';
       html += '<span style="margin-left:12px">记忆: ' + totalMem + ' 条</span>';
@@ -195,8 +200,8 @@ export class SystemPage {
       html += '</div></div>';
 
       html += '<div style="display:flex;gap:6px">';
-      html += '<button class="btn btn-sm btn-secondary restore-backup-btn" data-filename="' + esc(filename) + '"><i data-lucide="rotate-ccw" aria-hidden="true"></i><span>恢复</span></button>';
-      html += '<button class="btn btn-sm btn-danger delete-backup-btn" data-filename="' + esc(filename) + '"><i data-lucide="trash-2" aria-hidden="true"></i></button>';
+      html += '<button class="btn btn-sm btn-secondary restore-backup-btn" data-filename="' + esc(filename) + '"' + (!filename ? ' disabled' : '') + '><i data-lucide="rotate-ccw" aria-hidden="true"></i><span>恢复</span></button>';
+      html += '<button class="btn btn-sm btn-danger delete-backup-btn" data-filename="' + esc(filename) + '"' + (!filename ? ' disabled' : '') + '><i data-lucide="trash-2" aria-hidden="true"></i></button>';
       html += '</div></div>';
     });
 
@@ -226,7 +231,9 @@ export class SystemPage {
 
     try {
       const res = await this.api.post("backups/create", {});
-      this.showToast(`备份成功！共备份 ${res.total_memories || 0} 条记忆`);
+      const count = res.total_memories ?? res.total_chunks ?? 0;
+      const fn = res.filename || res.file_name || "";
+      this.showToast(`备份成功！共备份 ${count} 条记忆${fn ? ` (${fn})` : ""}`);
       this.fetchAndRenderBackups();
     } catch (e) {
       this.showToast(e.message || "创建备份失败", true);
@@ -236,6 +243,10 @@ export class SystemPage {
   }
 
   async handleRestoreBackup(filename) {
+    if (!filename || filename === "--") {
+      this.showToast("无效的备份文件名", true);
+      return;
+    }
     const ok = await showConfirm(
       "恢复备份确认",
       `确定要从备份「${filename}」恢复记忆吗？\n当前知识库中的记忆将被覆盖！系统会自动先创建安全快照。`,
@@ -245,7 +256,7 @@ export class SystemPage {
 
     try {
       const res = await this.api.post("backups/restore", { filename });
-      this.showToast(`恢复成功！已恢复 ${res.restored_count || 0} 条记忆`);
+      this.showToast(`恢复成功！已恢复 ${res.restored_count ?? res.restored_chunks ?? 0} 条记忆`);
       this.fetch();
       if (window._memoryPageInstance) {
         window._memoryPageInstance.fetch();
@@ -256,6 +267,10 @@ export class SystemPage {
   }
 
   async handleDeleteBackup(filename) {
+    if (!filename || filename === "--") {
+      this.showToast("无效的备份文件名", true);
+      return;
+    }
     const ok = await showConfirm(
       "删除备份确认",
       `确定要删除备份文件「${filename}」吗？该操作不可恢复！`,
@@ -278,25 +293,57 @@ export class SystemPage {
       const metaEl = document.getElementById("consolidation-meta");
       if (metaEl) {
         let html = '<div style="font-size:13px;line-height:1.8;color:var(--text-secondary,#555)">';
-        html += `<div>• 记忆半衰期: <strong>${data.half_life_days || 30} 天</strong> | 最大保留 (TTL): <strong>${data.ttl_days || 90} 天</strong></div>`;
-        html += `<div>• 单用户记忆上限: <strong>${data.max_docs || 200} 条</strong> | 去重相似度阈值: <strong>${data.dup_threshold || 0.9}</strong></div>`;
-        html += `<div>• 保护高重要度记忆: <strong>${data.protect_important ? "已启用" : "未启用"}</strong> | 遗忘前巩固: <strong>${data.consolidate_enabled ? "已启用" : "未启用"}</strong></div>`;
-        html += `<div>• Rerank 重排优化: <strong>${data.rerank_enabled ? `已启用 (${data.rerank_provider_id || "未指定模型"})` : "未启用"}</strong></div>`;
+        html += `<div>• 自动整理状态: <strong>${data.enabled ? "已启用" : "未启用"}</strong> | 触发条件: <strong>重要度 ≤ ${data.max_importance ?? 0.5} 且 记忆老龄 ≥ ${data.min_age_days ?? 7} 天</strong></div>`;
+        html += `<div>• 整理批次参数: <strong>每组最少 ${data.min_group_size ?? 3} 条</strong> | <strong>单次最多 ${data.max_groups ?? 5} 组</strong></div>`;
+        html += `<div>• 时间衰减参数: 记忆半衰期 <strong>${data.half_life_days || 30} 天</strong> | 最大保留 (TTL) <strong>${data.ttl_days || 90} 天</strong></div>`;
+        html += `<div>• 单用户记忆上限: <strong>${data.max_docs || 200} 条</strong> | 核心记忆保护: <strong>${data.protect_important ? "已启用 (≥0.85 豁免淘汰)" : "未启用"}</strong></div>`;
+        if (data.rerank_enabled) {
+          html += `<div>• Rerank 重排优化: <strong>已启用 (${esc(data.rerank_provider_id || "未指定模型")})</strong></div>`;
+        }
         html += '</div>';
         metaEl.innerHTML = html;
       }
     } catch (_) {}
   }
 
-  async handleRunUpgrade() {
+  async handleRunConsolidation() {
     const btn = document.getElementById("cons-run-btn");
     const resultEl = document.getElementById("cons-run-result");
+    if (btn) btn.disabled = true;
+    if (resultEl) resultEl.textContent = "正在执行记忆整理…";
+
+    try {
+      const res = await this.api.post("consolidation/run", {});
+      if (res.skipped) {
+        const msg = `整理跳过: ${res.reason || "未满足触发条件或无符合条件的碎片记忆"}`;
+        if (resultEl) resultEl.textContent = msg;
+        this.showToast(msg);
+      } else {
+        const summary = `整理完成：检查 ${res.owners_checked || 0} 位用户，整理 ${res.groups || 0} 组，提炼 ${res.new_memories || 0} 条长期记忆，清理 ${res.deleted || 0} 条碎片`;
+        if (resultEl) resultEl.textContent = summary;
+        this.showToast(summary);
+      }
+      this.fetch();
+      if (window._memoryPageInstance) {
+        window._memoryPageInstance.fetch();
+      }
+    } catch (e) {
+      if (resultEl) resultEl.textContent = e.message || "记忆整理失败";
+      this.showToast(e.message || "记忆整理失败", true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async handleRunUpgrade() {
+    const btn = document.getElementById("upgrade-run-btn");
+    const resultEl = document.getElementById("upgrade-run-result");
     if (btn) btn.disabled = true;
     if (resultEl) resultEl.textContent = "正在执行升级…";
 
     try {
       const res = await this.api.post("upgrade/run", {});
-      const summary = `升级完成：检查 ${res.owners_checked || 0} 个用户，成功升级 ${res.memories_upgraded || 0} 条记忆`;
+      const summary = `升级完成：检查 ${res.total_users ?? res.owners_checked ?? 0} 个用户，成功升级 ${res.success_users ?? res.memories_upgraded ?? 0} 位用户记忆`;
       if (resultEl) resultEl.textContent = summary;
       this.showToast(summary);
       this.fetch();

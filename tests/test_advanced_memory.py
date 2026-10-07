@@ -1068,8 +1068,96 @@ class TestMemoryRestore(unittest.TestCase):
         self.assertTrue(any("记忆恢复完成" in r for r in r_adm_restore))
         self.assertTrue(any("恢复用户数: 2 位" in r for r in r_adm_restore))
 
+    def test_consolidate_memories_logic(self):
+        """测试自动整理记忆逻辑（严格单用户隔离，低重要度老旧碎片聚合）。"""
+        context = FakeContext()
+        config = FakeConfig(
+            memory_enabled=True,
+            memory_consolidation_enabled=True,
+            memory_consolidation_min_age_days=7,
+            memory_consolidation_max_importance=0.5,
+            memory_consolidation_min_group_size=3,
+            memory_consolidation_max_groups_per_run=2,
+        )
+        mgr = MemoryManager(context, config)
+
+        old_ts = time.time() - 10 * 86400  # 10天前（符合老龄要求）
+        recent_ts = time.time() - 2 * 86400  # 2天前（不符合老龄要求）
+
+        deleted_ids = []
+        inserted_items = []
+
+        class MockVecDB:
+            async def delete(self, doc_id):
+                deleted_ids.append(doc_id)
+
+            async def insert(self, content, metadata=None):
+                inserted_items.append((content, metadata))
+
+            async def count_documents(self, metadata_filter=None):
+                return len(inserted_items)
+
+        mock_docs = [
+            # user_a: 3条符合条件的碎片（<=0.5 且 >7天）
+            {"doc_id": "a_1", "text": "用户今天吃了面", "updated_at": old_ts, "metadata": {"memory_owner": "user_a", "importance": 0.4, "type": "factual"}},
+            {"doc_id": "a_2", "text": "用户下午喝了茶", "updated_at": old_ts, "metadata": {"memory_owner": "user_a", "importance": 0.3, "type": "factual"}},
+            {"doc_id": "a_3", "text": "用户晚上吃了饺子", "updated_at": old_ts, "metadata": {"memory_owner": "user_a", "importance": 0.4, "type": "factual"}},
+            # user_a: 1条高重要度（不应被整理）
+            {"doc_id": "a_imp", "text": "用户对花生严重过敏", "updated_at": old_ts, "metadata": {"memory_owner": "user_a", "importance": 0.9, "type": "factual"}},
+            # user_a: 1条近期记录（不应被整理）
+            {"doc_id": "a_recent", "text": "用户刚才说了句你好", "updated_at": recent_ts, "metadata": {"memory_owner": "user_a", "importance": 0.2, "type": "factual"}},
+            # user_b: 仅有2条碎片（< min_group_size 3，不应触发）
+            {"doc_id": "b_1", "text": "用户B去了超市", "updated_at": old_ts, "metadata": {"memory_owner": "user_b", "importance": 0.3, "type": "factual"}},
+            {"doc_id": "b_2", "text": "用户B买了苹果", "updated_at": old_ts, "metadata": {"memory_owner": "user_b", "importance": 0.3, "type": "factual"}},
+        ]
+
+        class MockKB:
+            vec_db = MockVecDB()
+            class kb:
+                kb_id = "test_kb_id"
+
+        mgr.ensure_kb = lambda: asyncio.sleep(0, result=MockKB())
+        mgr._refresh_stats = lambda kb: asyncio.sleep(0)
+        mgr._sync_mem_doc = lambda kb, owner: asyncio.sleep(0)
+        mgr.get_all_memory_owners = lambda: asyncio.sleep(0, result=["user_a", "user_b"])
+
+        async def mock_all_chunks(vec_db, owner):
+            return [d for d in mock_docs if d["metadata"]["memory_owner"] == owner]
+
+        mgr._all_owner_chunks = mock_all_chunks
+
+        # Mock LLM chat 返回 JSON 摘要
+        async def mock_llm_chat(prompt, umo=""):
+            return '{"summary": "用户饮食偏好：面食与茶饮", "importance": 0.6, "type": "preference"}'
+
+        mgr._llm_chat = mock_llm_chat
+
+        # 执行全库整理
+        res = run(mgr.consolidate_memories(force=True))
+        self.assertTrue(res["success"])
+        self.assertEqual(res["owners_checked"], 2)
+        self.assertEqual(res["groups"], 1)  # 仅 user_a 触发1组
+        self.assertEqual(res["merged"], 3)  # 合并3条
+        self.assertEqual(res["new_memories"], 1)
+        self.assertEqual(res["deleted"], 3)
+
+        # 检查删除了 a_1, a_2, a_3，而未删除 a_imp, a_recent 或 user_b 的任何记录
+        self.assertEqual(set(deleted_ids), {"a_1", "a_2", "a_3"})
+        self.assertNotIn("a_imp", deleted_ids)
+        self.assertNotIn("a_recent", deleted_ids)
+        self.assertNotIn("b_1", deleted_ids)
+        self.assertNotIn("b_2", deleted_ids)
+
+        # 检查新插入的记忆归属严格为 user_a
+        self.assertEqual(len(inserted_items), 1)
+        text, md = inserted_items[0]
+        self.assertEqual(text, "用户饮食偏好：面食与茶饮")
+        self.assertEqual(md["memory_owner"], "user_a")
+        self.assertTrue(md["consolidated"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 
