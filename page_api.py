@@ -140,6 +140,9 @@ class PluginPageApi:
             (f"{PAGE_API_PREFIX}/consolidation/status", self.get_consolidation_status, ["GET"], "IsolatedMemory 整合配置与状态"),
             (f"{PAGE_API_PREFIX}/consolidation/run", self.run_consolidation, ["POST"], "IsolatedMemory 立即执行记忆整理"),
             (f"{PAGE_API_PREFIX}/upgrade/run", self.run_upgrade, ["POST"], "IsolatedMemory 一键升级全部记忆"),
+            (f"{PAGE_API_PREFIX}/affinity/list", self.list_affinity, ["GET"], "IsolatedMemory 好感度与羁绊列表"),
+            (f"{PAGE_API_PREFIX}/affinity/update", self.update_affinity, ["POST"], "IsolatedMemory 更新好感度与关系"),
+            (f"{PAGE_API_PREFIX}/affinity/reset", self.reset_affinity, ["POST"], "IsolatedMemory 重置好感度档案"),
         ]
 
         for route, handler, methods, desc in routes:
@@ -216,6 +219,14 @@ class PluginPageApi:
                 "importance_distribution": importance_dist,
                 "recent_sessions": recent_sessions,
             }
+
+            aff_mgr = getattr(self.plugin, "affinity_mgr", None)
+            if aff_mgr and hasattr(aff_mgr, "get_summary_stats"):
+                try:
+                    data["affinity_summary"] = aff_mgr.get_summary_stats()
+                except Exception as ae:
+                    logger.debug(f"[IsolatedMemory PageAPI] 获取好感度统计异常: {ae}")
+
             return _ok(data)
         except Exception as exc:
             logger.error(f"[IsolatedMemory PageAPI] 获取统计失败: {exc}", exc_info=True)
@@ -889,3 +900,101 @@ class PluginPageApi:
         except Exception as exc:
             logger.error(f"[IsolatedMemory PageAPI] 一键升级记忆失败: {exc}", exc_info=True)
             return _error(str(exc))
+
+    # ==================== 好感度与羁绊 API ====================
+
+    def _ensure_affinity_manager(self):
+        """确保好感度管理器已加载。"""
+        mgr = getattr(self.plugin, "affinity_mgr", None)
+        if mgr is None:
+            return None, _error("好感度系统未启用或未初始化")
+        return mgr, None
+
+    async def list_affinity(self) -> dict[str, Any]:
+        """获取好感度与羁绊列表（带关键词搜索、多维筛选、排序与分页）。"""
+        mgr, err = self._ensure_affinity_manager()
+        if err:
+            return err
+        try:
+            query = await _get_request_query()
+            keyword = str(query.get("keyword") or "").strip()
+            group_key = str(query.get("group_key") or "").strip()
+            persona_id = str(query.get("persona_id") or "").strip()
+            sort = str(query.get("sort") or "score_desc").strip()
+            try:
+                page = max(1, int(query.get("page") or 1))
+            except (ValueError, TypeError):
+                page = 1
+            try:
+                page_size = max(1, min(100, int(query.get("page_size") or 20)))
+            except (ValueError, TypeError):
+                page_size = 20
+
+            res = mgr.list_users(
+                keyword=keyword,
+                group_key=group_key,
+                persona_id=persona_id,
+                sort=sort,
+                page=page,
+                page_size=page_size,
+            )
+            return _ok(res)
+        except Exception as exc:
+            logger.error(f"[IsolatedMemory PageAPI] 获取好感度列表失败: {exc}", exc_info=True)
+            return _error(str(exc))
+
+    async def update_affinity(self) -> dict[str, Any]:
+        """更新指定用户的好感度数值、自由羁绊或阶段印象。"""
+        mgr, err = self._ensure_affinity_manager()
+        if err:
+            return err
+        try:
+            data = await _get_request_json()
+            group_key = str(data.get("group_key") or "").strip()
+            user_id = str(data.get("user_id") or "").strip()
+            persona_id = str(data.get("persona_id") or "default").strip()
+
+            if not group_key or not user_id:
+                return _error("缺少必要参数 group_key 或 user_id")
+
+            if "score" in data and data["score"] is not None:
+                try:
+                    score = int(data["score"])
+                    mgr.set_score(group_key, user_id, score, persona_id=persona_id)
+                except (ValueError, TypeError):
+                    return _error("好感度数值必须为有效整数")
+
+            if "relation" in data and data["relation"] is not None:
+                rel = str(data["relation"]).strip()
+                if rel:
+                    mgr.set_relation(group_key, user_id, rel, persona_id=persona_id)
+
+            if "eval" in data and data["eval"] is not None:
+                mgr.update_eval(group_key, user_id, str(data["eval"]), persona_id=persona_id)
+
+            user_info = mgr.get_user_info(group_key, user_id, persona_id=persona_id)
+            return _ok({"message": "更新成功", "user": user_info})
+        except Exception as exc:
+            logger.error(f"[IsolatedMemory PageAPI] 更新好感度失败: {exc}", exc_info=True)
+            return _error(str(exc))
+
+    async def reset_affinity(self) -> dict[str, Any]:
+        """重置指定用户的好感档案。"""
+        mgr, err = self._ensure_affinity_manager()
+        if err:
+            return err
+        try:
+            data = await _get_request_json()
+            group_key = str(data.get("group_key") or "").strip()
+            user_id = str(data.get("user_id") or "").strip()
+            persona_id = str(data.get("persona_id") or "default").strip()
+
+            if not group_key or not user_id:
+                return _error("缺少必要参数 group_key 或 user_id")
+
+            mgr.reset_user(group_key, user_id, persona_id=persona_id)
+            return _ok({"message": "好感档案已成功重置"})
+        except Exception as exc:
+            logger.error(f"[IsolatedMemory PageAPI] 重置好感档案失败: {exc}", exc_info=True)
+            return _error(str(exc))
+

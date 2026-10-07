@@ -34,11 +34,42 @@
     "description": "是否启用调试日志",
     "default": false
   },
+  "affinity_enabled": {
+    "type": "bool",
+    "description": "原生羁绊与好感度系统总开关",
+    "default": true,
+    "hint": "开启后启用内置好感度、自由式关系演进与即时心境系统。无上下限分数，自动兼容导入旧版好感度历史数据。"
+  },
+  "affinity_mood_enabled": {
+    "type": "bool",
+    "description": "即时心境系统开关",
+    "default": true,
+    "hint": "开启后启用轻量即时心境（如开心、赌气、害羞、委屈），维持1~2轮后自然平复，赋予Bot鲜活情绪反应且绝不死锁。"
+  },
+  "affinity_default_active_boost": {
+    "type": "bool",
+    "description": "常态对话活跃自愈成长",
+    "default": false,
+    "hint": "默认关闭（未输出标签时好感度+0不增加）。若开启，则当大模型未主动输出 [FAV] 标签时，自动为正常互动微增 +1 好感度。"
+  },
+  "affinity_render_theme": {
+    "type": "string",
+    "description": "好感度名片与排行榜海报渲染主题",
+    "options": ["dark", "light"],
+    "default": "dark",
+    "hint": "dark: 深色主题；light: 浅色主题"
+  },
+  "affinity_notice_enabled": {
+    "type": "bool",
+    "description": "好感度变动与评价更新消息提示",
+    "default": true,
+    "hint": "开启后，当大模型调分或更新阶段评价时，自动发送提示小尾巴消息（如：好感度 +2（当前: 3855） | 评价已更新 ✨）。"
+  },
   "favorability_reset_eval_with_session": {
     "type": "bool",
-    "description": "/会话重置 时是否同步清除当前人格的好感度评价（需安装 astrbot_plugin_favorability）",
+    "description": "/会话重置 时是否同步清除当前人格的好感度评价",
     "default": true,
-    "hint": "若已安装 astrbot_plugin_favorability 插件，开启后在会话重置时将同步重置当前人格对该用户的评价（印象重置为初次见面），严格保留好感度数值、关系档位、禁言等其它所有数据。"
+    "hint": "开启后在会话重置时将同步重置当前人格对该用户的评价（印象重置为初次见面），严格保留好感度数值、关系档位等其它所有数据。"
   },
   "memory": {
     "type": "object",

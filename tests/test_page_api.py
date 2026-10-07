@@ -234,6 +234,43 @@ class TestPageApi(unittest.TestCase):
         )
         self.memory_mgr.add_memory = mock.AsyncMock(return_value=True)
 
+        self.affinity_mgr = mock.MagicMock()
+        self.affinity_mgr.list_users.return_value = {
+            "items": [
+                {
+                    "group_key": "g1",
+                    "user_id": "u1",
+                    "persona_id": "default",
+                    "user_name": "Alice",
+                    "score": 100,
+                    "relation": "挚友",
+                    "eval": "很好",
+                    "mood_state": "平常心",
+                    "mood_reason": "",
+                    "mood_ttl": 0,
+                    "updated_at": 1700000000.0,
+                }
+            ],
+            "total": 1,
+            "page": 1,
+            "page_size": 20,
+            "personas": ["default"],
+            "groups": ["g1"],
+        }
+        self.affinity_mgr.get_summary_stats.return_value = {
+            "total_records": 1,
+            "total_users": 1,
+            "total_personas": 1,
+            "avg_score": 100.0,
+            "max_score": 100,
+            "relations": {"挚友": 1},
+        }
+        self.affinity_mgr.get_user_info.return_value = {
+            "score": 150,
+            "relation": "并肩战友",
+        }
+        self.plugin.affinity_mgr = self.affinity_mgr
+
         self.plugin.memory = self.memory_mgr
         self.page_api = PluginPageApi(self.plugin)
 
@@ -243,7 +280,7 @@ class TestPageApi(unittest.TestCase):
     def test_register_routes(self):
         """测试页面路由注册。"""
         self.page_api.register_routes()
-        self.assertEqual(len(self.registered_apis), 15)
+        self.assertEqual(len(self.registered_apis), 19)
         routes = [r[0] for r in self.registered_apis]
         self.assertIn(f"{PAGE_API_PREFIX}/stats", routes)
         self.assertIn(f"{PAGE_API_PREFIX}/memories", routes)
@@ -261,6 +298,9 @@ class TestPageApi(unittest.TestCase):
         self.assertIn(f"{PAGE_API_PREFIX}/consolidation/status", routes)
         self.assertIn(f"{PAGE_API_PREFIX}/consolidation/run", routes)
         self.assertIn(f"{PAGE_API_PREFIX}/upgrade/run", routes)
+        self.assertIn(f"{PAGE_API_PREFIX}/affinity/list", routes)
+        self.assertIn(f"{PAGE_API_PREFIX}/affinity/update", routes)
+        self.assertIn(f"{PAGE_API_PREFIX}/affinity/reset", routes)
 
     def test_get_stats(self):
         """测试统计数据获取。"""
@@ -442,6 +482,47 @@ class TestPageApi(unittest.TestCase):
         res = run(self.page_api.run_upgrade())
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["data"]["memories_upgraded"], 2)
+
+    def test_affinity_page_apis(self):
+        """测试好感度与羁绊 Web API（列表查询、更新与重置）。"""
+        # 1. 列表查询
+        with mock.patch.object(page_api_mod, "_get_request_query", return_value={"keyword": "Alice", "page": 1}):
+            res = run(self.page_api.list_affinity())
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["data"]["total"], 1)
+            self.assertEqual(res["data"]["items"][0]["user_name"], "Alice")
+            self.affinity_mgr.list_users.assert_called_once_with(
+                keyword="Alice", group_key="", persona_id="", sort="score_desc", page=1, page_size=20
+            )
+
+        # 2. 更新好感度
+        update_payload = {
+            "group_key": "g1",
+            "user_id": "u1",
+            "persona_id": "default",
+            "score": 150,
+            "relation": "并肩战友",
+            "eval": "十分靠谱",
+        }
+        with mock.patch.object(page_api_mod, "_get_request_json", return_value=update_payload):
+            res = run(self.page_api.update_affinity())
+            self.assertEqual(res["status"], "ok")
+            self.affinity_mgr.set_score.assert_called_once_with("g1", "u1", 150, persona_id="default")
+            self.affinity_mgr.set_relation.assert_called_once_with("g1", "u1", "并肩战友", persona_id="default")
+            self.affinity_mgr.update_eval.assert_called_once_with("g1", "u1", "十分靠谱", persona_id="default")
+
+        # 3. 重置好感档案
+        reset_payload = {"group_key": "g1", "user_id": "u1", "persona_id": "default"}
+        with mock.patch.object(page_api_mod, "_get_request_json", return_value=reset_payload):
+            res = run(self.page_api.reset_affinity())
+            self.assertEqual(res["status"], "ok")
+            self.affinity_mgr.reset_user.assert_called_once_with("g1", "u1", persona_id="default")
+
+        # 4. 统计中包含 affinity_summary
+        res_stats = run(self.page_api.get_stats())
+        self.assertEqual(res_stats["status"], "ok")
+        self.assertIn("affinity_summary", res_stats["data"])
+        self.assertEqual(res_stats["data"]["affinity_summary"]["total_users"], 1)
 
 
 if __name__ == "__main__":

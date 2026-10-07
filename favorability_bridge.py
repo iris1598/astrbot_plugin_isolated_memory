@@ -1,4 +1,4 @@
-﻿"""
+"""
 favorability_bridge - 与 astrbot_plugin_favorability 的联动桥接模块
 
 功能：
@@ -80,8 +80,20 @@ def get_favorability_plugin() -> Optional[Any]:
     return None
 
 
-def is_favorability_installed() -> bool:
-    """判断当前 AstrBot 环境是否安装并启用了 astrbot_plugin_favorability。"""
+def is_favorability_installed(context: Optional[Any] = None) -> bool:
+    """判断当前 AstrBot 环境是否启用了好感度系统（内置或外部插件）。"""
+    if context is not None and getattr(context, "_affinity_mgr", None) is not None:
+        return True
+
+    try:
+        from astrbot.core.star.star import star_registry
+        for star in star_registry:
+            if star.name == "astrbot_plugin_isolated_memory" and hasattr(star.star_cls, "affinity_mgr"):
+                if getattr(star.star_cls, "affinity_enabled", True):
+                    return True
+    except Exception:
+        pass
+
     plug = get_favorability_plugin()
     if plug is not None:
         return True
@@ -207,6 +219,30 @@ async def clear_favorability_eval(
             group_key = group_storage_key(event.unified_msg_origin, user_id)
     else:
         group_key = group_storage_key(event.unified_msg_origin, user_id)
+
+    # 0. 优先检测当前 isolated_memory 内部集成的 AffinityManager
+    internal_mgr = getattr(context, "_affinity_mgr", None)
+    if internal_mgr is None:
+        # 尝试从 active stars 查找
+        try:
+            from astrbot.core.star.star import star_registry
+            for star in star_registry:
+                if star.name == "astrbot_plugin_isolated_memory" and hasattr(star.star_cls, "affinity_mgr"):
+                    internal_mgr = getattr(star.star_cls, "affinity_mgr")
+                    break
+        except Exception:
+            pass
+
+    if internal_mgr is not None and hasattr(internal_mgr, "clear_user_eval"):
+        try:
+            cleared = internal_mgr.clear_user_eval(group_key, user_id, persona_id=persona_id)
+            if cleared:
+                logger.info(
+                    f"[IsolatedMemory] (内部好感引擎) 已成功清除用户 {user_id} 在人格【{persona_id}】下的好感度评价"
+                )
+                return cleared, persona_id
+        except Exception as e:
+            logger.warning(f"[IsolatedMemory] 内部清除好感度评价异常: {e}")
 
     # 1. 优先使用 FavorabilityManager 原生方法（如果可用）
     if fav_plugin is not None and hasattr(fav_plugin, "db"):

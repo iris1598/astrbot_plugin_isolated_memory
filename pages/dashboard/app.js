@@ -8,6 +8,7 @@ import {
   MemoryPage,
   RecallPage,
   SystemPage,
+  AffinityPage,
 } from "./modules/index.js";
 
 (() => {
@@ -38,6 +39,7 @@ import {
   const memoryPage = new MemoryPage(state, api, peekPanel);
   const recallPage = new RecallPage(state, api, peekPanel);
   const systemPage = new SystemPage(state, api);
+  const affinityPage = new AffinityPage(state, api);
 
   function hydrateIcons() {
     if (window.lucide && typeof window.lucide.createIcons === "function") {
@@ -82,6 +84,7 @@ import {
 
     if (name === "memory") memoryPage.fetch();
     else if (name === "system") systemPage.fetch();
+    else if (name === "affinity") affinityPage.fetch();
   }
 
   document.addEventListener("DOMContentLoaded", async () => {

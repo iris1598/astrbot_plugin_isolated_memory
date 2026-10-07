@@ -1142,6 +1142,7 @@ class MemoryManager:
         text: str,
         importance: float | None = None,
         fact_type: str | None = None,
+        metadata: dict | None = None,
     ) -> bool:
         """写入一条记忆；若与现有记忆高度相似则强化现有条目而非重复写入。
 
@@ -1150,6 +1151,7 @@ class MemoryManager:
             text: 记忆文本。
             importance: 重要度数值（0.1~1.0），未传时优先从 text 属性获取，默认 0.6。
             fact_type: 事实类型（preference/factual/planned/episodic），未传时从 text 属性获取，默认 factual。
+            metadata: 额外追加的元数据字段（如自动整理标记）。
 
         Returns:
             bool: 是否成功写入或强化了现有记忆。
@@ -1195,8 +1197,8 @@ class MemoryManager:
             chunk_count = await kb.vec_db.count_documents(
                 metadata_filter={"memory_owner": owner}
             )
-            metadata = {
-                "kb_id": kb.kb.kb_id,
+            chunk_metadata = {
+                "kb_id": getattr(getattr(kb, "kb", None), "kb_id", ""),
                 "kb_doc_id": doc_id,
                 "chunk_index": chunk_count,
                 "memory_owner": owner,
@@ -1206,8 +1208,10 @@ class MemoryManager:
                 "importance": round(importance, 2),
                 "type": fact_type,
             }
+            if metadata and isinstance(metadata, dict):
+                chunk_metadata.update(metadata)
             try:
-                await kb.vec_db.insert(content=text, metadata=metadata)
+                await kb.vec_db.insert(content=text, metadata=chunk_metadata)
                 await self._refresh_stats(kb)
                 await self._sync_mem_doc(kb, owner)
                 return True
@@ -1462,7 +1466,7 @@ class MemoryManager:
                             owner,
                             summary,
                             importance=max(0.1, min(1.0, imp)),
-                            memory_type=mem_type,
+                            fact_type=mem_type,
                             metadata={
                                 "consolidated": True,
                                 "consolidated_from_count": len(group),

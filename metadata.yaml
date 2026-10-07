@@ -1,6 +1,6 @@
 name: astrbot_plugin_isolated_memory
-display_name: 衰减记忆与会话工具
-desc: 随时间衰减长期记忆（配合官方会话隔离按群×成员独立）+ 中文会话指令（会话重置/信息、存档/读档/列表/删档，后端为官方 ConversationManager）+ 依据全部记忆生成鸣潮角色共鸣匹配档案；内置可视化管理后台（记忆管理、检索测试、记忆库自动整理、备份恢复与一键升级）；数据与 astrbot_plugin_isolated_session 兼容，可用 isolated_session_export 迁移
-version: v1.3.2
+display_name: 衰减记忆与羁绊好感度
+desc: 随时间衰减长期记忆（按群×成员独立）+ 原生羁绊好感度系统（无上下限数值保留、大模型自由式关系、即时心境与现代卡片海报）+ 官方中文会话指令（会话重置/信息、存档/读档/列表/删档）+ 鸣潮角色共鸣匹配；内置可视化管理后台；数据100%无损兼容旧版好感度与记忆插件
+version: v2.0.0
 author: iris1598
 repo: "https://github.com/iris1598/astrbot_plugin_isolated_memory"

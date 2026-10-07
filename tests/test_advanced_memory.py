@@ -40,6 +40,12 @@ class FakeConfig(dict):
     pass
 
 
+class FakeContext:
+    conversation_manager = None
+    persona_manager = None
+    kb_manager = None
+
+
 def make_manager(**mem):
     cfg = FakeConfig(memory=dict(mem))
     ctx = type("C", (), {"kb_manager": None})()
@@ -971,7 +977,7 @@ class TestMemoryRestore(unittest.TestCase):
 
             # 1. 覆盖恢复全员
             res = run(mgr.restore_memories_from_backup(
-                backup_identifier="1",
+                backup_identifier=os.path.basename(bf),
                 mode="overwrite",
                 backup_dir=tmpdir,
             ))
@@ -985,7 +991,7 @@ class TestMemoryRestore(unittest.TestCase):
             inserted_items.clear()
             deleted_owners.clear()
             res_single = run(mgr.restore_memories_from_backup(
-                backup_identifier="1",
+                backup_identifier=os.path.basename(bf),
                 mode="overwrite",
                 target_owner="user_a",
                 backup_dir=tmpdir,
@@ -1020,6 +1026,8 @@ class TestMemoryRestore(unittest.TestCase):
         class MockContext:
             conversation_manager = None
             persona_manager = None
+
+        FakeContext = MockContext
 
         plugin = Main(MockContext(), FakeConfig(memory_enabled=True))
         plugin.memory = MockMemoryMgr()

@@ -7,6 +7,7 @@ export { PeekPanel } from "./peek-panel.js";
 export { MemoryPage } from "./memory-page.js";
 export { RecallPage } from "./recall-page.js";
 export { SystemPage } from "./system-page.js";
+export { AffinityPage } from "./affinity-page.js";
 export {
   normalizeImportance,
   getDetailText,

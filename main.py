@@ -47,15 +47,20 @@ THIRD_PARTY_RUNNER_KEYS = {
     "deerflow": DEERFLOW_THREAD_ID_KEY,
 }
 
+from pathlib import Path
 from . import character_render
 from . import favorability_bridge as FB
 from . import mbti_render
 from . import session_tools as T
+from .affinity_manager import AffinityManager
+from .affinity_render import AffinityRenderer
+from .affinity_service import AffinityService
+from .commands_affinity import AffinityCommands
 from .memory import MemoryManager
 
 
 class Main(Star):
-    """衰减记忆 + 官方会话指令工具插件。"""
+    """衰减记忆 + 原生羁绊好感度 + 官方会话指令工具插件。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context, config)
@@ -67,6 +72,32 @@ class Main(Star):
         # 惰性自愈：上次初始化尝试时间与失败原因（配置改后无需重启）
         self._last_init_try: float = 0.0
         self._init_reason: str = ""
+
+        # ── 好感度、自由关系与即时心境子系统 ──
+        try:
+            from astrbot.api.star import StarTools
+            aff_data_dir = StarTools.get_data_dir("astrbot_plugin_isolated_memory")
+        except Exception:
+            aff_data_dir = Path("data/plugin_data/astrbot_plugin_isolated_memory")
+
+        self.affinity_mgr = AffinityManager(aff_data_dir)
+        try:
+            self.context._affinity_mgr = self.affinity_mgr
+        except Exception:
+            pass
+
+        theme = str(self.config.get("affinity_render_theme", "dark") or "dark")
+        try:
+            self.affinity_renderer = AffinityRenderer(
+                aff_data_dir / "affinity_cache", theme=theme
+            )
+            self.affinity_renderer.cleanup_cache()
+        except Exception as e:
+            self.affinity_renderer = None
+            logger.debug(f"[IsolatedMemory] 好感度渲染器未就绪(将使用纯文本): {e}")
+
+        self.affinity_cmds = AffinityCommands(self)
+
         self.page_api = None
         self._register_page_api_if_available()
 
@@ -125,6 +156,54 @@ class Main(Star):
             logger.info(f"[IsolatedMemory] 记忆系统未启用: {reason}")
         self._sync_agent_tools_state()
 
+        # 尝试自动从旧版 astrbot_plugin_favorability 迁移存量高分与关系档案
+        try:
+            from astrbot.api.star import StarTools
+            legacy_dir = StarTools.get_data_dir("astrbot_plugin_favorability")
+        except Exception:
+            legacy_dir = Path("data/plugin_data/astrbot_plugin_favorability")
+        if legacy_dir.exists():
+            try:
+                migrated = self.affinity_mgr.migrate_from_legacy_plugin(legacy_dir)
+                if migrated > 0:
+                    logger.info(
+                        f"[IsolatedMemory] 成功无损迁移 {migrated} 条历史好感度记录"
+                    )
+            except Exception as e:
+                logger.warning(f"[IsolatedMemory] 自动迁移历史好感度数据异常: {e}")
+
+    @property
+    def affinity_enabled(self) -> bool:
+        return bool(self.config.get("affinity_enabled", True))
+
+    @property
+    def affinity_mood_enabled(self) -> bool:
+        return bool(self.config.get("affinity_mood_enabled", True))
+
+    @property
+    def affinity_default_active_boost(self) -> bool:
+        return bool(self.config.get("affinity_default_active_boost", False))
+
+    @property
+    def affinity_render_theme(self) -> str:
+        return str(self.config.get("affinity_render_theme", "dark") or "dark")
+
+    @property
+    def affinity_notice_enabled(self) -> bool:
+        return bool(self.config.get("affinity_notice_enabled", True))
+
+    def affinity_keys(self, event: AstrMessageEvent) -> tuple[str, str]:
+        """返回 (group_key, user_id) 归一化群存储键与发送者 ID。"""
+        user_id = str(event.get_sender_id())
+        group_key = FB.group_storage_key(event.unified_msg_origin, user_id)
+        return group_key, user_id
+
+    async def resolve_affinity_persona(
+        self, event: AstrMessageEvent, req: ProviderRequest = None
+    ) -> str:
+        """解析当前会话生效的人格 ID。"""
+        return await FB.resolve_persona_id(self.context, event, None)
+
     def _sync_agent_tools_state(self) -> None:
         """根据配置同步 AstrBot 内部 FuncTool 的 active 状态。
         当工具 active=False 时，AstrBot 在构造 LLM 请求时会自动过滤该工具，不把工具暴露给模型。
@@ -172,8 +251,30 @@ class Main(Star):
     async def on_llm_request(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
-        """LLM 请求前：召回衰减记忆并注入为临时内容块。"""
+        """LLM 请求前：召回衰减记忆并注入为临时内容块；同时注入好感度与心境设定。"""
         self._sync_agent_tools_state()
+
+        # ── 1. 好感度、自由关系与即时心境注入（独立于记忆知识库开关）──
+        if self.affinity_enabled:
+            try:
+                aff_group_key, aff_user_id = self.affinity_keys(event)
+                aff_persona_id = await self.resolve_affinity_persona(event, req)
+                user_info = self.affinity_mgr.get_user_info(
+                    aff_group_key, aff_user_id, persona_id=aff_persona_id
+                )
+                aff_prompt = AffinityService.build_prompt_context(
+                    user_info,
+                    affinity_enabled=True,
+                    mood_enabled=self.affinity_mood_enabled,
+                )
+                if aff_prompt:
+                    req.extra_user_content_parts.append(
+                        TextPart(text=aff_prompt).mark_as_temp()
+                    )
+            except Exception as e:
+                logger.debug(f"[IsolatedMemory] 好感度上下文注入异常: {e}")
+
+        # ── 2. 衰减长时记忆检索与注入 ──
         if await self._ensure_memory() is None:
             return
         group_cfg = self._group_gate(event)
@@ -227,7 +328,114 @@ class Main(Star):
     async def on_llm_response(
         self, event: AstrMessageEvent, response: LLMResponse
     ) -> None:
-        """LLM 回复后：按间隔抽取对话中的可记忆事实并写入记忆库。"""
+        """LLM 回复后：解析好感微调与心境，按间隔抽取对话中的可记忆事实。"""
+        # ── 1. 好感度、心境与自由关系响应处理（独立于记忆开关，优先清洗标签）──
+        if self.affinity_enabled and response and response.completion_text:
+            try:
+                parsed = AffinityService.parse_response(
+                    response.completion_text,
+                    default_active_boost=self.affinity_default_active_boost,
+                )
+                # 彻底清洗正文（100% 杜绝标签泄露）
+                response.completion_text = parsed["clean_text"]
+
+                aff_group_key, aff_user_id = self.affinity_keys(event)
+                aff_persona_id = await self.resolve_affinity_persona(event)
+                sender_name = event.get_sender_name() or ""
+
+                if parsed["fav_delta"] != 0:
+                    self.affinity_mgr.adjust_score(
+                        aff_group_key,
+                        aff_user_id,
+                        parsed["fav_delta"],
+                        persona_id=aff_persona_id,
+                        user_name=sender_name,
+                    )
+
+                if parsed["mood"]:
+                    m_state, m_reason = parsed["mood"]
+                    self.affinity_mgr.update_mood(
+                        aff_group_key,
+                        aff_user_id,
+                        m_state,
+                        m_reason,
+                        ttl=2,
+                        persona_id=aff_persona_id,
+                    )
+                else:
+                    self.affinity_mgr.decay_mood(
+                        aff_group_key, aff_user_id, persona_id=aff_persona_id
+                    )
+
+                if parsed["eval_text"]:
+                    self.affinity_mgr.update_eval(
+                        aff_group_key,
+                        aff_user_id,
+                        parsed["eval_text"],
+                        persona_id=aff_persona_id,
+                    )
+
+                # ── 发送好感度变动与评价更新提示小尾巴 ──
+                if self.affinity_notice_enabled and (parsed["fav_delta"] != 0 or parsed["eval_text"]):
+                    async def _notify_affinity_tips():
+                        await asyncio.sleep(0.5)
+                        tips = []
+                        if parsed["fav_delta"] != 0:
+                            symbol = "+" if parsed["fav_delta"] > 0 else ""
+                            uinfo = self.affinity_mgr.get_user_info(
+                                aff_group_key, aff_user_id, persona_id=aff_persona_id
+                            )
+                            tips.append(f"好感度 {symbol}{parsed['fav_delta']}（当前: {uinfo['score']}）")
+                        if parsed["eval_text"]:
+                            tips.append("评价已更新 ✨")
+                        if tips:
+                            try:
+                                from astrbot.api.event import MessageChain
+                                mc = MessageChain().message(" | ".join(tips))
+                                if hasattr(self.context, "send_message"):
+                                    await self.context.send_message(event.unified_msg_origin, mc)
+                                else:
+                                    try:
+                                        await event.send(mc)
+                                    except Exception:
+                                        await event.send(event.plain_result(" | ".join(tips)))
+                            except Exception as ex:
+                                logger.debug(f"[Affinity] 发送好感度提示异常: {ex}")
+
+                    self._schedule_task(_notify_affinity_tips())
+
+                if parsed["rel_proposal"]:
+                    ok, status, pending_data = self.affinity_mgr.propose_relation(
+                        aff_group_key,
+                        aff_user_id,
+                        parsed["rel_proposal"],
+                        persona_id=aff_persona_id,
+                        user_name=sender_name,
+                    )
+                    if ok:
+                        async def _notify_rel():
+                            notice = (
+                                f" 💞 想将与你的关系演进为「{parsed['rel_proposal']}」\n"
+                                f"回复「/确认关系」生效，或「/取消关系」拒绝（10分钟内有效）"
+                            )
+                            try:
+                                from astrbot.api.event import MessageChain
+                                mc = MessageChain().at(sender_name or "", aff_user_id).message(notice)
+                                if hasattr(self.context, "send_message"):
+                                    await self.context.send_message(event.unified_msg_origin, mc)
+                                else:
+                                    try:
+                                        await event.send(mc)
+                                    except Exception:
+                                        await event.send(event.plain_result(f"@{sender_name} " + notice.lstrip()))
+                            except Exception as ex:
+                                logger.debug(f"[Affinity] 发送关系提议通知异常: {ex}")
+
+                        self._schedule_task(_notify_rel())
+            except Exception as e:
+                logger.warning(f"[IsolatedMemory] 好感度响应处理异常: {e}")
+
+        # ── 2. 衰减长时记忆事实抽取 ──
         if await self._ensure_memory() is None:
             return
         group_cfg = self._group_gate(event)
@@ -1382,3 +1590,61 @@ class Main(Star):
             f"❌ 生成失败：{reason}。请稍后重试，或检查记忆系统的知识库配置与 characters 角色目录。"
         )
         return
+
+    # ══════════════════════════════════════════════════════════
+    #  好感度、自由关系与即时心境指令
+    # ══════════════════════════════════════════════════════════
+
+    @filter.command("查询好感度", alias={"好感度", "favorability", "affinity"})
+    async def cmd_affinity_query(self, event: AstrMessageEvent):
+        """查询好感度档案。不带参数查自己，@他人查指定用户。"""
+        async for r in self.affinity_cmds.cmd_query(event):
+            yield r
+
+    @filter.command("好感度排行", alias={"好感排行", "好感度正序"})
+    async def cmd_affinity_rank(self, event: AstrMessageEvent):
+        """查看当前群聊好感度排行榜（高分在前）。"""
+        async for r in self.affinity_cmds.cmd_rank(event, reverse=False):
+            yield r
+
+    @filter.command("好感度倒序", alias={"好感倒序"})
+    async def cmd_affinity_rank_asc(self, event: AstrMessageEvent):
+        """查看当前群聊好感度逆序排行榜（低分在前）。"""
+        async for r in self.affinity_cmds.cmd_rank(event, reverse=True):
+            yield r
+
+    @filter.command("重置好感度", alias={"重置我的好感度"})
+    async def cmd_affinity_reset_self(self, event: AstrMessageEvent):
+        """重置自己的好感度与关系记录。"""
+        async for r in self.affinity_cmds.cmd_reset_self(event):
+            yield r
+
+    @filter.command("确认关系", alias={"同意关系"})
+    async def cmd_affinity_confirm_relation(self, event: AstrMessageEvent):
+        """确认大模型提议的待生效关系变动。"""
+        async for r in self.affinity_cmds.cmd_confirm_relation(event):
+            yield r
+
+    @filter.command("取消关系", alias={"拒绝关系"})
+    async def cmd_affinity_cancel_relation(self, event: AstrMessageEvent):
+        """取消大模型提议的待生效关系变动。"""
+        async for r in self.affinity_cmds.cmd_cancel_relation(event):
+            yield r
+
+    @filter.command("设置好感度")
+    async def cmd_admin_set_score(self, event: AstrMessageEvent):
+        """【管理员】设置指定用户好感度。/设置好感度 <@用户> <分数>"""
+        async for r in self.affinity_cmds.cmd_admin_set_score(event):
+            yield r
+
+    @filter.command("设置关系")
+    async def cmd_admin_set_relation(self, event: AstrMessageEvent):
+        """【管理员】设置指定用户关系定位。/设置关系 <@用户> <关系名称>"""
+        async for r in self.affinity_cmds.cmd_admin_set_relation(event):
+            yield r
+
+    @filter.command("重置指定好感度")
+    async def cmd_admin_reset_user(self, event: AstrMessageEvent):
+        """【管理员】重置指定用户好感度档案。/重置指定好感度 <@用户>"""
+        async for r in self.affinity_cmds.cmd_admin_reset_user(event):
+            yield r

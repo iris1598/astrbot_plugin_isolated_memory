@@ -37,6 +37,7 @@
     "nav.memory":         { zh: "记忆管理", en: "Memories" },
     "nav.recall":         { zh: "检索测试", en: "Recall Test" },
     "nav.system":         { zh: "系统概览", en: "System Overview" },
+    "nav.affinity":       { zh: "好感与羁绊", en: "Affinity & Bonds" },
 
     /* ---- Status & Types ---- */
     "status.active":      { zh: "活跃", en: "Active" },
