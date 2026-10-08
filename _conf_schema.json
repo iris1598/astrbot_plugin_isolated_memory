@@ -46,13 +46,19 @@
     "type": "bool",
     "description": "即时心境系统开关",
     "default": true,
-    "hint": "开启后启用轻量即时心境（如开心、赌气、害羞、委屈），维持1~2轮后自然平复，赋予Bot鲜活情绪反应且绝不死锁。"
+    "hint": "开启后启用轻量即时心境（如开心、赌气、害羞、委屈），维持1~2轮后自然平复，赋予Bot鲜活情绪反应且绝不死锁。",
+    "condition": {
+      "affinity_enabled": true
+    }
   },
   "affinity_default_active_boost": {
     "type": "bool",
     "description": "常态对话活跃自愈成长",
     "default": false,
-    "hint": "默认关闭（未输出标签时好感度+0不增加）。若开启，则当大模型未主动输出 [FAV] 标签时，自动为正常互动微增 +1 好感度。"
+    "hint": "默认关闭（未输出标签时好感度+0不增加）。若开启，则当大模型未主动输出 [FAV] 标签时，自动为正常互动微增 +1 好感度。",
+    "condition": {
+      "affinity_enabled": true
+    }
   },
   "affinity_render_theme": {
     "type": "string",
@@ -62,19 +68,28 @@
       "light"
     ],
     "default": "dark",
-    "hint": "dark: 深色主题；light: 浅色主题"
+    "hint": "dark: 深色主题；light: 浅色主题",
+    "condition": {
+      "affinity_enabled": true
+    }
   },
   "affinity_notice_enabled": {
     "type": "bool",
     "description": "好感度变动与评价更新消息提示",
     "default": true,
-    "hint": "开启后，当大模型调分或更新阶段评价时，自动发送提示小尾巴消息（如：好感度 +2（当前: 3855） | 评价已更新 ✨）。"
+    "hint": "开启后，当大模型调分或更新阶段评价时，自动发送提示小尾巴消息（如：好感度 +2（当前: 3855） | 评价已更新 ✨）。",
+    "condition": {
+      "affinity_enabled": true
+    }
   },
   "favorability_reset_eval_with_session": {
     "type": "bool",
     "description": "/会话重置 时是否同步清除当前人格的好感度评价",
     "default": true,
-    "hint": "开启后在会话重置时将同步重置当前人格对该用户的评价（印象重置为初次见面），严格保留好感度数值、关系档位等其它所有数据。"
+    "hint": "开启后在会话重置时将同步重置当前人格对该用户的评价（印象重置为初次见面），严格保留好感度数值、关系档位等其它所有数据。",
+    "condition": {
+      "affinity_enabled": true
+    }
   },
   "affinity_system_time_enabled": {
     "type": "bool",
@@ -101,214 +116,322 @@
         "description": "共享记忆知识库（单选）",
         "default": [],
         "_special": "select_knowledgebase",
-        "hint": "选择用户自建的一个知识库。所有用户的记忆以带 owner 元数据的 chunk 共存于该库，按会话归属隔离。请勿删除该库，否则记忆将丢失"
+        "hint": "选择用户自建的一个知识库。所有用户的记忆以带 owner 元数据的 chunk 共存于该库，按会话归属隔离。请勿删除该库，否则记忆将丢失",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_extract_interval": {
         "type": "int",
         "description": "每多少轮对话触发一次记忆提取",
         "default": 3,
         "obvious_hint": true,
-        "hint": "每 N 轮对话抽取一次记忆，避免每条消息都触发（消耗 LLM 调用）。触发时把间隔内积累的全部对话轮次一并交给提取 LLM。默认 3；0 = 每轮都抽取（不推荐）"
+        "hint": "每 N 轮对话抽取一次记忆，避免每条消息都触发（消耗 LLM 调用）。触发时把间隔内积累的全部对话轮次一并交给提取 LLM。默认 3；0 = 每轮都抽取（不推荐）",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_extract_provider_id": {
         "type": "string",
         "description": "记忆提取专用 LLM 模型（独立配置）",
         "default": "",
         "hint": "留空则使用当前会话的聊天模型进行提取。建议配置独立的快速模型；提取在后台异步执行，不阻塞对话回复",
-        "_special": "select_provider"
+        "_special": "select_provider",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_extract_timeout": {
         "type": "int",
         "description": "记忆提取请求超时时间（秒），0=不限制",
         "default": 30,
-        "hint": "提取在后台执行，超时仅跳过本轮提取，不影响对话"
+        "hint": "提取在后台执行，超时仅跳过本轮提取，不影响对话",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_extract_include_persona": {
         "type": "bool",
         "description": "将当前人设（Persona）提供给记忆提取 LLM",
         "default": true,
-        "hint": "开启后，提取提示词会附上当前会话生效的人设文本，使提取的记忆与人设对齐"
+        "hint": "开启后，提取提示词会附上当前会话生效的人设文本，使提取的记忆与人设对齐",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_extract_use_names": {
         "type": "bool",
         "description": "提取提示词中使用用户昵称和机器人名（替代「用户/助手」）",
         "default": true,
-        "hint": "开启后，抽取提示词用消息发送者的昵称称呼用户；机器人名取下方 memory_extract_bot_name（留空用「助手」）。获取不到昵称时自动回退「用户」"
+        "hint": "开启后，抽取提示词用消息发送者的昵称称呼用户；机器人名取下方 memory_extract_bot_name（留空用「助手」）。获取不到昵称时自动回退「用户」",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_extract_bot_name": {
         "type": "string",
         "description": "提取提示词中机器人的称呼（留空用「助手」）",
         "default": "",
-        "hint": "仅在 memory_extract_use_names 开启且能获取到用户昵称时生效"
+        "hint": "仅在 memory_extract_use_names 开启且能获取到用户昵称时生效",
+        "condition": {
+          "memory_extract_use_names": true
+        }
       },
       "memory_extract_persona_max_chars": {
         "type": "int",
         "description": "注入提取提示词的人设文本最大字符数",
-        "default": 1000
+        "default": 1000,
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_half_life_days": {
         "type": "float",
         "description": "记忆衰减半衰期（天）",
         "default": 30,
-        "hint": "effective = 相似度 × 0.5^(天数/半衰期)。半衰期越短，旧记忆衰减越快"
+        "hint": "effective = 相似度 × 0.5^(天数/半衰期)。半衰期越短，旧记忆衰减越快",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_ttl_days": {
         "type": "float",
         "description": "记忆遗忘阈值 TTL（天），超过后被清扫删除",
         "default": 90,
-        "hint": "超过该天数的记忆不再召回，并在惰性清扫时从知识库中删除"
+        "hint": "超过该天数的记忆不再召回，并在惰性清扫时从知识库中删除",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_inject_top_k": {
         "type": "int",
         "description": "每次请求注入的记忆条数",
-        "default": 3
+        "default": 3,
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_min_score": {
         "type": "float",
         "description": "记忆注入的最低有效分数（0 表示不限制）",
-        "default": 0.0
+        "default": 0.0,
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_inject_max_chars": {
         "type": "int",
         "description": "注入记忆文本总字符上限",
-        "default": 600
+        "default": 600,
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_fetch_k": {
         "type": "int",
         "description": "记忆检索池大小（稠密/稀疏召回上限）",
         "default": 200,
-        "hint": "实际池大小取 max(fetch_k, 每用户记忆上限+20)，保证 owner 过滤不漏召回"
+        "hint": "实际池大小取 max(fetch_k, 每用户记忆上限+20)，保证 owner 过滤不漏召回",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_dup_threshold": {
         "type": "float",
         "description": "记忆去重相似度阈值",
         "default": 0.9,
-        "hint": "新记忆与现有记忆相似度 ≥ 阈值时，仅强化现有记忆（刷新时间戳）而不重复写入"
+        "hint": "新记忆与现有记忆相似度 ≥ 阈值时，仅强化现有记忆（刷新时间戳）而不重复写入",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_max_docs_per_user": {
         "type": "int",
         "description": "每用户记忆条数上限（超出按最近使用裁剪）",
-        "default": 200
+        "default": 200,
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_sweep_interval_minutes": {
         "type": "int",
         "description": "记忆惰性清扫间隔（分钟）",
         "default": 60,
-        "hint": "清扫删除超过 TTL 的记忆并按上限裁剪；0=每次请求都清扫"
+        "hint": "清扫删除超过 TTL 的记忆并按上限裁剪；0=每次请求都清扫",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_consolidation_enabled": {
         "type": "bool",
         "description": "启用记忆库自动整理",
         "default": false,
-        "hint": "定期把同一用户零散的低价值碎片记忆聚合、整理、总结为更精炼的长期记忆，从源头控制记忆库规模"
+        "hint": "定期把同一用户零散的低价值碎片记忆聚合、整理、总结为更精炼的长期记忆，从源头控制记忆库规模",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_consolidation_min_age_days": {
         "type": "int",
         "description": "整理最小记忆年龄（天）",
         "default": 7,
-        "hint": "只整理创建时间早于该天数的记忆，避免整合近期仍在更新活跃的对话记录"
+        "hint": "只整理创建时间早于该天数的记忆，避免整合近期仍在更新活跃的对话记录",
+        "condition": {
+          "memory_consolidation_enabled": true
+        }
       },
       "memory_consolidation_max_importance": {
         "type": "float",
         "description": "整理最大重要度阈值",
         "default": 0.5,
-        "hint": "只整理重要度低于该值的低权重碎片记忆，高重要度记忆保持不变"
+        "hint": "只整理重要度低于该值的低权重碎片记忆，高重要度记忆保持不变",
+        "condition": {
+          "memory_consolidation_enabled": true
+        }
       },
       "memory_consolidation_min_group_size": {
         "type": "int",
         "description": "每组最少记忆条数",
         "default": 3,
-        "hint": "单用户内待整理碎片达到该数量时才触发聚合，避免琐碎的 LLM 调用"
+        "hint": "单用户内待整理碎片达到该数量时才触发聚合，避免琐碎的 LLM 调用",
+        "condition": {
+          "memory_consolidation_enabled": true
+        }
       },
       "memory_consolidation_max_groups_per_run": {
         "type": "int",
         "description": "单次最多整理组数",
         "default": 5,
-        "hint": "限制单次执行整理的组数，避免一次性消耗过多 LLM Token"
+        "hint": "限制单次执行整理的组数，避免一次性消耗过多 LLM Token",
+        "condition": {
+          "memory_consolidation_enabled": true
+        }
       },
       "memory_mmr_enabled": {
         "type": "bool",
         "description": "MMR 召回多样性去重",
         "default": true,
-        "hint": "基于最大边际相关性算法打散候选记忆，防止同质/重复偏好塞满注入窗口"
+        "hint": "基于最大边际相关性算法打散候选记忆，防止同质/重复偏好塞满注入窗口",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_protect_important": {
         "type": "bool",
         "description": "核心重要记忆保护",
         "default": true,
-        "hint": "重要度 ≥0.85 的关键事实/偏好（如过敏、姓名、长期设定）豁免 TTL 过期删除"
+        "hint": "重要度 ≥0.85 的关键事实/偏好（如过敏、姓名、长期设定）豁免 TTL 过期删除",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_context_expansion": {
         "type": "bool",
         "description": "短文本上下文查询扩展",
         "default": true,
-        "hint": "用户输入 <=15 字符时，拼接上一轮助手的回复片段参与检索，避免短语脱靶"
+        "hint": "用户输入 <=15 字符时，拼接上一轮助手的回复片段参与检索，避免短语脱靶",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_agent_tools_enabled": {
         "type": "bool",
         "description": "Agent 记忆函数调用工具总开关",
         "default": true,
-        "hint": "开启后向 AstrBot 注册记忆工具供大模型主动调用；关闭后彻底禁用所有 Agent 记忆工具"
+        "hint": "开启后向 AstrBot 注册记忆工具供大模型主动调用；关闭后彻底禁用所有 Agent 记忆工具",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_tool_recall_enabled": {
         "type": "bool",
         "description": "允许 Agent 主动检索记忆 (recall_user_memory)",
         "default": true,
-        "hint": "供 Agent 在需要详细了解用户偏好或背景时主动发起记忆检索"
+        "hint": "供 Agent 在需要详细了解用户偏好或背景时主动发起记忆检索",
+        "condition": {
+          "memory_agent_tools_enabled": true
+        }
       },
       "memory_tool_memorize_enabled": {
         "type": "bool",
         "description": "允许 Agent 主动录入记忆 (memorize_user_memory)",
         "default": false,
-        "hint": "供 Agent 在用户明确要求记住某事时主动写入长时记忆。默认关闭以保持克制，避免模型频繁写入琐碎信息（日常对话已由后台定时提取系统负责）"
+        "hint": "供 Agent 在用户明确要求记住某事时主动写入长时记忆。默认关闭以保持克制，避免模型频繁写入琐碎信息（日常对话已由后台定时提取系统负责）",
+        "condition": {
+          "memory_agent_tools_enabled": true
+        }
       },
       "memory_rerank_enabled": {
         "type": "bool",
         "description": "是否启用 Rerank 神经重排序（可选）",
         "default": false,
-        "hint": "开启后在双路初筛后，调用 AstrBot 的 Rerank 跨编码器模型精排，大幅提升长难句与复杂语境检索精度。未配置或异常时自动无感降级"
+        "hint": "开启后在双路初筛后，调用 AstrBot 的 Rerank 跨编码器模型精排，大幅提升长难句与复杂语境检索精度。未配置或异常时自动无感降级",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_rerank_provider_id": {
         "type": "string",
         "description": "Rerank 提供商 ID（可选填空）",
         "default": "",
-        "hint": "AstrBot「服务提供商」中 Rerank 类型提供商的 ID。留空时自动检测首个已激活的 Rerank 提供商，也可在此手动填入 Provider ID（如硅基流动或本地 Rerank 的 ID）"
+        "hint": "AstrBot「服务提供商」中 Rerank 类型提供商的 ID。留空时自动检测首个已激活的 Rerank 提供商，也可在此手动填入 Provider ID（如硅基流动或本地 Rerank 的 ID）",
+        "condition": {
+          "memory_rerank_enabled": true
+        }
       },
       "memory_rerank_candidates": {
         "type": "int",
         "description": "送入 Rerank 重排序的候选数量",
         "default": 15,
-        "hint": "双路检索挑出该数量的候选送交 Rerank 模型精排，建议 10~25"
+        "hint": "双路检索挑出该数量的候选送交 Rerank 模型精排，建议 10~25",
+        "condition": {
+          "memory_rerank_enabled": true
+        }
       },
       "memory_reset_with_session": {
         "type": "bool",
         "description": "/会话重置 时是否一并清空该用户记忆",
         "default": false,
-        "hint": "默认关闭：长时记忆独立于对话上下文；开启后重置会话会同步清除记忆（需该群在记忆启用列表中）"
+        "hint": "默认关闭：长时记忆独立于对话上下文；开启后重置会话会同步清除记忆（需该群在记忆启用列表中）",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_mbti_enabled": {
         "type": "bool",
         "description": "鸣潮角色共鸣评测功能（xxti / /记忆测评）",
         "default": true,
-        "hint": "开启后成员可用 xxti 或 /记忆测评 依据自己已保存的全部记忆匹配最契合的鸣潮角色并生成纯文本共鸣档案。报告只读记忆、不写回"
+        "hint": "开启后成员可用 xxti 或 /记忆测评 依据自己已保存的全部记忆匹配最契合的鸣潮角色并生成纯文本共鸣档案。报告只读记忆、不写回",
+        "condition": {
+          "memory_enabled": true
+        }
       },
       "memory_mbti_min_memories": {
         "type": "int",
         "description": "生成共鸣档案所需的最少记忆条数",
         "default": 5,
-        "hint": "记忆过少时匹配没有意义，低于该条数直接提示用户继续积累记忆，默认 5 条"
+        "hint": "记忆过少时匹配没有意义，低于该条数直接提示用户继续积累记忆，默认 5 条",
+        "condition": {
+          "memory_mbti_enabled": true
+        }
       },
       "memory_mbti_max_chars": {
         "type": "int",
         "description": "参与比对的记忆文本字符上限",
         "default": 3000,
-        "hint": "按最近使用时间倒序截取，超出部分不参与分析（下限 500）"
+        "hint": "按最近使用时间倒序截取，超出部分不参与分析（下限 500）",
+        "condition": {
+          "memory_mbti_enabled": true
+        }
       },
       "character_match_custom_dir": {
         "type": "string",
         "description": "自定义鸣潮角色配置目录（可选）",
         "default": "",
-        "hint": "留空则默认读取插件内置 characters 目录。如需挂载外部目录，可填写角色 YAML 文件夹的绝对路径"
+        "hint": "留空则默认读取插件内置 characters 目录。如需挂载外部目录，可填写角色 YAML 文件夹的绝对路径",
+        "condition": {
+          "memory_mbti_enabled": true
+        }
       },
       "character_match_output_mode": {
         "type": "string",
@@ -319,13 +442,19 @@
           "both"
         ],
         "default": "image",
-        "hint": "image: 默认发送精美「人格弹珠」风格海报图片（渲染失败自动回退纯文本）；text: 仅发送纯文本；both: 同时发送海报图片与纯文本"
+        "hint": "image: 默认发送精美「人格弹珠」风格海报图片（渲染失败自动回退纯文本）；text: 仅发送纯文本；both: 同时发送海报图片与纯文本",
+        "condition": {
+          "memory_mbti_enabled": true
+        }
       },
       "character_match_top_k": {
         "type": "int",
         "description": "全域角色共鸣度分布展示的角色数量上限",
         "default": 5,
-        "hint": "默认仅展示契合度最高的前 5 位角色，避免后续扩充大量角色时海报过于冗长"
+        "hint": "默认仅展示契合度最高的前 5 位角色，避免后续扩充大量角色时海报过于冗长",
+        "condition": {
+          "memory_mbti_enabled": true
+        }
       }
     }
   }
