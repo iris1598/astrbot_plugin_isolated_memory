@@ -28,7 +28,6 @@ except ImportError:  # pragma: no cover
 # 内置角色素材目录
 PLUGIN_DIR = Path(__file__).resolve().parent
 DEFAULT_IMAGES_DIR = PLUGIN_DIR / "characters" / "images"
-FALLBACK_WORKSPACE_DIR = Path(r"C:\Users\84637\Desktop\code\角色")
 
 # 字体候选列表（跨平台支持）
 FONT_CANDIDATES_BOLD = [
@@ -108,9 +107,6 @@ def find_character_image(
     char_dir = PLUGIN_DIR / "characters"
     if char_dir.is_dir() and char_dir not in search_dirs:
         search_dirs.append(char_dir)
-
-    if FALLBACK_WORKSPACE_DIR.is_dir() and FALLBACK_WORKSPACE_DIR not in search_dirs:
-        search_dirs.append(FALLBACK_WORKSPACE_DIR)
 
     clean_name = _normalize_name(name)
     clean_id = _normalize_name(char_id) if char_id else ""

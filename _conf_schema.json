@@ -24,7 +24,9 @@
             "default": true,
             "hint": "关闭后该群所有成员不再召回与抽取；需全局 memory_enabled 开启"
           }
-        }
+        },
+        "name": "群聊配置",
+        "display_item": "group_id"
       }
     },
     "default": []
@@ -55,7 +57,10 @@
   "affinity_render_theme": {
     "type": "string",
     "description": "好感度名片与排行榜海报渲染主题",
-    "options": ["dark", "light"],
+    "options": [
+      "dark",
+      "light"
+    ],
     "default": "dark",
     "hint": "dark: 深色主题；light: 浅色主题"
   },
@@ -70,6 +75,12 @@
     "description": "/会话重置 时是否同步清除当前人格的好感度评价",
     "default": true,
     "hint": "开启后在会话重置时将同步重置当前人格对该用户的评价（印象重置为初次见面），严格保留好感度数值、关系档位等其它所有数据。"
+  },
+  "affinity_system_time_enabled": {
+    "type": "bool",
+    "description": "每条消息注入真实物理时间与星期",
+    "default": true,
+    "hint": "开启后在用户消息(user prompt)末尾直接注入当前物理时间（如 [当前时间: 2026-10-08 10:40:00 星期四]），随对话历史持久化，方便大模型计算与上次对话的时间跨度与时效感知。"
   },
   "memory": {
     "type": "object",
@@ -302,7 +313,11 @@
       "character_match_output_mode": {
         "type": "string",
         "description": "角色共鸣档案输出形式（海报图片/纯文本/两者皆发）",
-        "options": ["image", "text", "both"],
+        "options": [
+          "image",
+          "text",
+          "both"
+        ],
         "default": "image",
         "hint": "image: 默认发送精美「人格弹珠」风格海报图片（渲染失败自动回退纯文本）；text: 仅发送纯文本；both: 同时发送海报图片与纯文本"
       },

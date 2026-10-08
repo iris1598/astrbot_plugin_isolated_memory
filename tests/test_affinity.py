@@ -255,6 +255,32 @@ class TestAffinityService(unittest.TestCase):
         cleaned = clean_affinity_tags(messy_text)
         self.assertEqual(cleaned, "你好啊！")
 
+    def test_parse_unsigned_fav_and_no_leakage(self):
+        # 针对用户反馈：测试模型输出无符号 [FAV:2] 时的解析与防泄漏清洗
+        text1 = "哈哈你真逗！[FAV:2]"
+        p1 = AffinityService.parse_response(text1)
+        self.assertEqual(p1["fav_delta"], 2)
+        self.assertTrue(p1["has_fav_tag"])
+        self.assertEqual(p1["clean_text"], "哈哈你真逗！")
+
+        # 空格变体 [FAV: 2]
+        text2 = "好的呢~ [FAV: 2]"
+        p2 = AffinityService.parse_response(text2)
+        self.assertEqual(p2["fav_delta"], 2)
+        self.assertEqual(p2["clean_text"], "好的呢~")
+
+        # 中文别名 [好感度:2]、[好感:+3]
+        text3 = "真厉害！[好感度:2]"
+        p3 = AffinityService.parse_response(text3)
+        self.assertEqual(p3["fav_delta"], 2)
+        self.assertEqual(p3["clean_text"], "真厉害！")
+
+        # 负分 [FAV:-1]
+        text4 = "不要胡说八道啦！[FAV:-1]"
+        p4 = AffinityService.parse_response(text4)
+        self.assertEqual(p4["fav_delta"], -1)
+        self.assertEqual(p4["clean_text"], "不要胡说八道啦！")
+
 
     def test_notice_message_formatting(self):
         # 验证提示消息拼接格式与原版保持一致（无任何人格前缀）

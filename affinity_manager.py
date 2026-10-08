@@ -27,12 +27,18 @@ def group_storage_key(umo: str, sender_id: str) -> str:
 
     官方隔离开启后群聊 UMO 形如 {平台}:GroupMessage:{用户}_{群}，
     好感度数据按群共享，剥掉发话者前缀还原为 {平台}:GroupMessage:{群}。
+    同时兼容旧版 isolated_queue__{用户}__{群} 格式。
     私聊/webchat 等非群 UMO 原样返回。
     """
     parts = umo.split(":", 2)
     if len(parts) != 3 or parts[1] != "GroupMessage":
         return umo
     sid = parts[2]
+    # 兼容旧插件队列格式: isolated_queue__1927736726__1041386550 -> 1041386550
+    if "isolated_queue__" in sid:
+        sub_parts = sid.split("__")
+        if len(sub_parts) >= 3 and sub_parts[-1]:
+            return f"{parts[0]}:{parts[1]}:{sub_parts[-1]}"
     prefix = f"{sender_id}_"
     if sender_id and sid.startswith(prefix) and len(sid) > len(prefix):
         return f"{parts[0]}:{parts[1]}:{sid[len(prefix):]}"
@@ -71,6 +77,7 @@ class AffinityManager:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "affinity_v1.db"
         self._lock = asyncio.Lock()
+        self.detected_legacy_groups: set[str] = set()
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -776,34 +783,76 @@ class AffinityManager:
 
     # ── 历史旧数据自动迁移（Zero Data Loss）──────────────────────────
 
-    def migrate_from_legacy_plugin(self, legacy_root: Path) -> int:
+    def _find_legacy_json_files(self, custom_path: Path | str | None = None) -> list[tuple[str, Path]]:
+        """智能多源探测 favorability.json 及所有人格/备份数据文件。"""
+        targets: list[tuple[str, Path]] = []
+        visited_files: set[str] = set()
+
+        def add_file(pid: str, f: Path):
+            try:
+                rf = str(f.resolve()).lower()
+                if rf not in visited_files and f.is_file() and f.stat().st_size > 2:
+                    visited_files.add(rf)
+                    targets.append((pid, f))
+            except Exception:
+                pass
+
+        def scan_dir(d: Path):
+            if not d.exists() or not d.is_dir():
+                return
+            try:
+                for f in d.iterdir():
+                    if f.is_file() and ("favorability" in f.name.lower() and (f.name.lower().endswith((".json", ".bak")) or ".bak." in f.name.lower())):
+                        add_file("default", f)
+            except Exception:
+                pass
+            p_dir = d / "personas"
+            if p_dir.exists() and p_dir.is_dir():
+                try:
+                    for sub in p_dir.iterdir():
+                        if sub.is_dir():
+                            for f in sub.iterdir():
+                                if f.is_file() and "favorability" in f.name.lower():
+                                    add_file(sub.name, f)
+                except Exception:
+                    pass
+
+        # 1. 显式路径（若提供且存在有效数据，直接以显式路径为准，避免测试或指定路径时跨域污染）
+        if custom_path:
+            cp = Path(custom_path)
+            if cp.is_file():
+                add_file("default", cp)
+            elif cp.is_dir():
+                scan_dir(cp)
+            if targets:
+                return targets
+
+        # 2. 仅扫描标准 AstrBot 插件数据目录
+        candidate_dirs = [
+            Path("data/plugin_data/astrbot_plugin_favorability"),
+            Path("AstrBot/data/plugin_data/astrbot_plugin_favorability"),
+            Path.home() / ".astrbot" / "data" / "plugin_data" / "astrbot_plugin_favorability",
+        ]
+        for cd in candidate_dirs:
+            scan_dir(cd)
+
+        return targets
+
+    def migrate_from_legacy_plugin(self, legacy_root: Path | str | None = None) -> int:
         """自动无损迁移 astrbot_plugin_favorability 的存量 JSON 数据。
 
-        扫描 legacy_root/favorability.json 及 legacy_root/personas/*/favorability.json，
-        将群组、用户、真实分数、关系、评价、昵称 100% 完整导入 SQLite 数据库。
+        仅扫描显式传入路径或 AstrBot 标准插件数据目录 (data/plugin_data/astrbot_plugin_favorability)，
+        严禁跨目录扫描任何用户私有文件夹。
         返回迁移成功的用户条目数。
         """
-        if not legacy_root.exists():
+        json_targets = self._find_legacy_json_files(legacy_root)
+        if not json_targets:
             return 0
 
         migrated_count = 0
-        json_targets: list[tuple[str, Path]] = []
-
-        # 1. 默认人格
-        default_file = legacy_root / "favorability.json"
-        if default_file.exists():
-            json_targets.append(("default", default_file))
-
-        # 2. 多人格目录
-        personas_dir = legacy_root / "personas"
-        if personas_dir.exists() and personas_dir.is_dir():
-            for p_dir in personas_dir.iterdir():
-                if p_dir.is_dir():
-                    p_file = p_dir / "favorability.json"
-                    if p_file.exists():
-                        json_targets.append((p_dir.name, p_file))
-
         now = time.time()
+        self.detected_legacy_groups = set()
+
         with self._get_connection() as conn:
             for pid, file_path in json_targets:
                 try:
@@ -812,7 +861,7 @@ class AffinityManager:
                     if not isinstance(data, dict):
                         continue
 
-                    for group_key, users in data.items():
+                    for raw_gk, users in data.items():
                         if not isinstance(users, dict):
                             continue
                         for raw_uid, u_data in users.items():
@@ -820,6 +869,14 @@ class AffinityManager:
                                 continue
 
                             uid = extract_user_id(str(raw_uid))
+                            group_key = group_storage_key(raw_gk, uid)
+
+                            # 提取群号
+                            if ":GroupMessage:" in group_key:
+                                gid = group_key.split(":GroupMessage:")[-1]
+                                if gid and not gid.startswith("isolated_queue__"):
+                                    self.detected_legacy_groups.add(gid)
+
                             score = int(u_data.get("score", 0))
                             relation = str(u_data.get("relation") or self.DEFAULT_RELATION)
                             eval_text = str(u_data.get("eval") or self.DEFAULT_EVAL)
@@ -831,7 +888,6 @@ class AffinityManager:
 
                             cooldown = u_data.get("rel_cooldown_until")
 
-                            # 仅当不存在或分数更高时插入/更新
                             conn.execute(
                                 """
                                 INSERT INTO user_affinity (
@@ -840,10 +896,10 @@ class AffinityManager:
                                     eval, updated_at
                                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 ON CONFLICT(group_key, user_id, persona_id) DO UPDATE SET
-                                    score = excluded.score,
-                                    relation = excluded.relation,
-                                    eval = excluded.eval,
-                                    user_name = COALESCE(NULLIF(excluded.user_name, ''), user_affinity.user_name),
+                                    score = CASE WHEN excluded.score > user_affinity.score THEN excluded.score ELSE user_affinity.score END,
+                                    relation = CASE WHEN user_affinity.relation = '普通朋友' AND excluded.relation != '普通朋友' THEN excluded.relation ELSE user_affinity.relation END,
+                                    eval = CASE WHEN user_affinity.eval = '初次见面' AND excluded.eval != '初次见面' THEN excluded.eval ELSE user_affinity.eval END,
+                                    user_name = COALESCE(NULLIF(user_affinity.user_name, ''), excluded.user_name),
                                     updated_at = excluded.updated_at
                                 """,
                                 (
@@ -866,5 +922,7 @@ class AffinityManager:
             conn.commit()
 
         if migrated_count > 0:
-            logger.info(f"[AffinityManager] 历史好感度数据迁移完成：成功导入 {migrated_count} 位用户档案")
+            logger.info(
+                f"[AffinityManager] 历史好感度数据迁移完成：成功导入 {migrated_count} 位用户档案，检测到群聊: {sorted(list(self.detected_legacy_groups))}"
+            )
         return migrated_count

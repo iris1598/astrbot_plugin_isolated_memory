@@ -552,18 +552,51 @@ class MemoryManager:
 
     # ── 配置读取 ───────────────────────────────────────────────
 
-    def _cfg(self, key: str, default: Any) -> Any:
-        """读取记忆配置：优先「memory」分组，兼容旧版扁平键。"""
+    def _cfg(self, key: str, default: Any = None) -> Any:
+        """自适应多层配置读取：
+        1. 经典「memory」分组（对齐 AstrBot 官方长时记忆规范）
+        2. 根级直取（对齐单元测试 Mock 及根级配置）
+        3. 兼容近期临时 9 大分区卡片结构
+        4. 兜底遍历任意字典子项
+        """
         try:
-            group = self.config.get("memory")
-            if isinstance(group, dict) and key in group:
-                return group.get(key, default)
+            cfg = self.config
+            if not isinstance(cfg, dict):
+                return default
+
+            # 1. 经典 memory 分组
+            mem = cfg.get("memory")
+            if isinstance(mem, dict) and key in mem and mem[key] is not None:
+                return mem[key]
+
+            # 2. 根级直取
+            if key in cfg and cfg[key] is not None:
+                return cfg[key]
+
+            # 3. 兼容 9 大分区
+            sections = (
+                "basic_settings",
+                "affinity_settings",
+                "memory_core",
+                "memory_extract",
+                "memory_retrieval",
+                "memory_maintenance",
+                "memory_tools",
+                "memory_rerank",
+                "memory_resonance",
+            )
+            for sec in sections:
+                sub = cfg.get(sec)
+                if isinstance(sub, dict) and key in sub and sub[key] is not None:
+                    return sub[key]
+
+            for k, sub in cfg.items():
+                if k not in sections and k != "memory" and isinstance(sub, dict):
+                    if key in sub and sub[key] is not None:
+                        return sub[key]
         except Exception:
             pass
-        try:
-            return self.config.get(key, default)
-        except Exception:
-            return default
+        return default
 
     def _kb_name(self) -> str:
         names = self._cfg("memory_kb_name", []) or []

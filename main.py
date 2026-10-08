@@ -24,6 +24,7 @@ import asyncio
 import os
 import re
 import time
+from typing import Any
 
 from astrbot.api import AstrBotConfig, logger, sp
 from astrbot.api.event import AstrMessageEvent, filter
@@ -54,7 +55,7 @@ from . import mbti_render
 from . import session_tools as T
 from .affinity_manager import AffinityManager
 from .affinity_render import AffinityRenderer
-from .affinity_service import AffinityService
+from .affinity_service import AffinityService, format_system_time
 from .commands_affinity import AffinityCommands
 from .memory import MemoryManager
 
@@ -86,7 +87,7 @@ class Main(Star):
         except Exception:
             pass
 
-        theme = str(self.config.get("affinity_render_theme", "dark") or "dark")
+        theme = str(self._mcfg("affinity_render_theme", "dark") or "dark")
         try:
             self.affinity_renderer = AffinityRenderer(
                 aff_data_dir / "affinity_cache", theme=theme
@@ -162,35 +163,45 @@ class Main(Star):
             legacy_dir = StarTools.get_data_dir("astrbot_plugin_favorability")
         except Exception:
             legacy_dir = Path("data/plugin_data/astrbot_plugin_favorability")
-        if legacy_dir.exists():
-            try:
-                migrated = self.affinity_mgr.migrate_from_legacy_plugin(legacy_dir)
-                if migrated > 0:
-                    logger.info(
-                        f"[IsolatedMemory] 成功无损迁移 {migrated} 条历史好感度记录"
-                    )
-            except Exception as e:
-                logger.warning(f"[IsolatedMemory] 自动迁移历史好感度数据异常: {e}")
+        try:
+            migrated = self.affinity_mgr.migrate_from_legacy_plugin(legacy_dir)
+            if migrated > 0:
+                logger.info(
+                    f"[IsolatedMemory] 成功无损迁移 {migrated} 条历史好感度记录"
+                )
+        except Exception as e:
+            logger.warning(f"[IsolatedMemory] 自动迁移历史好感度数据异常: {e}")
+
+        # 自动迁移群设置与历史配置（确保 WebUI 与门控立即获得有效群列表）
+        try:
+            detected_groups = getattr(self.affinity_mgr, "detected_legacy_groups", set())
+            self._migrate_group_and_plugin_config(detected_groups)
+        except Exception as e:
+            logger.debug(f"[IsolatedMemory] 自动迁移群配置异常: {e}")
 
     @property
     def affinity_enabled(self) -> bool:
-        return bool(self.config.get("affinity_enabled", True))
+        return bool(self._mcfg("affinity_enabled", True))
 
     @property
     def affinity_mood_enabled(self) -> bool:
-        return bool(self.config.get("affinity_mood_enabled", True))
+        return bool(self._mcfg("affinity_mood_enabled", True))
 
     @property
     def affinity_default_active_boost(self) -> bool:
-        return bool(self.config.get("affinity_default_active_boost", False))
+        return bool(self._mcfg("affinity_default_active_boost", False))
 
     @property
     def affinity_render_theme(self) -> str:
-        return str(self.config.get("affinity_render_theme", "dark") or "dark")
+        return str(self._mcfg("affinity_render_theme", "dark") or "dark")
 
     @property
     def affinity_notice_enabled(self) -> bool:
-        return bool(self.config.get("affinity_notice_enabled", True))
+        return bool(self._mcfg("affinity_notice_enabled", True))
+
+    @property
+    def affinity_system_time_enabled(self) -> bool:
+        return bool(self._mcfg("affinity_system_time_enabled", True))
 
     def affinity_keys(self, event: AstrMessageEvent) -> tuple[str, str]:
         """返回 (group_key, user_id) 归一化群存储键与发送者 ID。"""
@@ -254,7 +265,22 @@ class Main(Star):
         """LLM 请求前：召回衰减记忆并注入为临时内容块；同时注入好感度与心境设定。"""
         self._sync_agent_tools_state()
 
-        # ── 1. 好感度、自由关系与即时心境注入（独立于记忆知识库开关）──
+        # ── 1. 物理真实时间直接注入到 user prompt (req.prompt) ──
+        # 固定附带在每条用户消息后随对话历史持久化，使模型在多轮历史中准确感知与上次对话的时间跨度
+        if self.affinity_system_time_enabled:
+            try:
+                time_str = format_system_time()
+                time_tag = f"\n[当前时间: {time_str}]"
+                curr_prompt = req.prompt or ""
+                if "[当前时间:" not in curr_prompt and "[当前时间：" not in curr_prompt:
+                    if curr_prompt.strip():
+                        req.prompt = f"{curr_prompt.rstrip()}{time_tag}"
+                    else:
+                        req.prompt = f"[当前时间: {time_str}]"
+            except Exception as e:
+                logger.debug(f"[IsolatedMemory] user prompt 时间注入异常: {e}")
+
+        # ── 2. 好感度、自由关系、即时心境子系统（注入 extra_user_content_parts，无需在 extra 重复时间）──
         if self.affinity_enabled:
             try:
                 aff_group_key, aff_user_id = self.affinity_keys(event)
@@ -262,10 +288,19 @@ class Main(Star):
                 user_info = self.affinity_mgr.get_user_info(
                     aff_group_key, aff_user_id, persona_id=aff_persona_id
                 )
+                sender_name = ""
+                if hasattr(event, "get_sender_name"):
+                    try:
+                        sender_name = str(event.get_sender_name() or "")
+                    except Exception:
+                        sender_name = ""
                 aff_prompt = AffinityService.build_prompt_context(
-                    user_info,
-                    affinity_enabled=True,
+                    user_info=user_info,
+                    affinity_enabled=self.affinity_enabled,
                     mood_enabled=self.affinity_mood_enabled,
+                    system_time_enabled=False,  # 依用户要求：时间已直接写入 req.prompt，extra 中不再注入
+                    sender_name=sender_name,
+                    user_id=aff_user_id,
                 )
                 if aff_prompt:
                     req.extra_user_content_parts.append(
@@ -274,7 +309,7 @@ class Main(Star):
             except Exception as e:
                 logger.debug(f"[IsolatedMemory] 好感度上下文注入异常: {e}")
 
-        # ── 2. 衰减长时记忆检索与注入 ──
+        # ── 3. 衰减长时记忆检索与注入 ──
         if await self._ensure_memory() is None:
             return
         group_cfg = self._group_gate(event)
@@ -301,19 +336,20 @@ class Main(Star):
                 event.set_extra("_isolated_memory_persona", persona)
 
             prompt_text = req.prompt.strip()
-            search_query = prompt_text
+            # 检索知识库时过滤掉注入的时间标签，以纯粹的用户提问文本作为检索 query
+            search_query = re.sub(r"\[当前时间[:：][^\]]+\]", "", prompt_text).strip() or prompt_text
             # 上下文增强检索（Context Expansion）：短文本查询时尝试从上一轮助手发言补充上下文
-            if len(prompt_text) <= 15 and bool(self._mcfg("memory_context_expansion", True)):
+            if len(search_query) <= 15 and bool(self._mcfg("memory_context_expansion", True)):
                 prev_text = await self._get_recent_assistant_context(owner)
                 if prev_text:
-                    search_query = f"{prev_text} {prompt_text}"
+                    search_query = f"{prev_text} {search_query}"
 
             hits = await self.memory.recall(owner, search_query)
             if hits:
                 req.extra_user_content_parts.append(
                     TextPart(text=self.memory.format_injection(hits)).mark_as_temp()
                 )
-                if self.config.get("enable_debug_log"):
+                if self._mcfg("enable_debug_log", False):
                     logger.debug(
                         f"[IsolatedMemory] 注入记忆 {len(hits)} 条: "
                         + "; ".join(
@@ -496,23 +532,219 @@ class Main(Star):
 
     # ── 记忆：群聊门控 ─────────────────────────────────────────
 
+    def _migrate_group_and_plugin_config(
+        self, detected_historical_groups: set[str] | list[str] | None = None
+    ) -> None:
+        """多源自适应合并群聊设置并持久化到 WebUI 配置。
+        
+        支持无损汇聚：
+        1. 当前配置根级 memory_groups (AstrBot 官方规范)
+        2. 当前配置 basic_settings.memory_groups (近期临时嵌套结构兼容)
+        3. 当前配置根级 whitelist_groups (旧插件 astrbot_plugin_isolated_session 兼容)
+        4. 磁盘历史插件配置文件中的 memory_groups / whitelist_groups (包括 isolated_memory_old 等)
+        5. 从存量好感度数据库/备份中自动识别的活跃群聊 (detected_historical_groups)
+        """
+        existing_groups_map: dict[str, dict] = {}
+
+        def _merge_item(gid: str, name: str = "", enabled: bool = True):
+            gid = str(gid).strip()
+            if not gid:
+                return
+            if gid in existing_groups_map:
+                if name and (
+                    not existing_groups_map[gid].get("group_name")
+                    or str(existing_groups_map[gid].get("group_name", "")).startswith("历史群聊")
+                ):
+                    existing_groups_map[gid]["group_name"] = name
+                existing_groups_map[gid]["__template_key"] = "group_config"
+            else:
+                existing_groups_map[gid] = {
+                    "__template_key": "group_config",
+                    "group_id": gid,
+                    "group_name": name or f"历史群聊 {gid}",
+                    "memory_enabled": bool(enabled),
+                }
+
+        cfg = self.config if isinstance(self.config, dict) else {}
+
+        # 1. 根级 memory_groups (官方规范)
+        if isinstance(cfg.get("memory_groups"), list):
+            for g in cfg["memory_groups"]:
+                if isinstance(g, dict) and str(g.get("group_id", "")).strip():
+                    _merge_item(
+                        str(g.get("group_id")),
+                        str(g.get("group_name") or ""),
+                        bool(g.get("memory_enabled", True)),
+                    )
+
+        # 2. 临时 basic_settings.memory_groups
+        basic = cfg.get("basic_settings")
+        if isinstance(basic, dict) and isinstance(basic.get("memory_groups"), list):
+            for g in basic["memory_groups"]:
+                if isinstance(g, dict) and str(g.get("group_id", "")).strip():
+                    _merge_item(
+                        str(g.get("group_id")),
+                        str(g.get("group_name") or ""),
+                        bool(g.get("memory_enabled", True)),
+                    )
+
+        # 3. 根级 whitelist_groups (旧插件)
+        if isinstance(cfg.get("whitelist_groups"), list):
+            for g in cfg["whitelist_groups"]:
+                if isinstance(g, dict) and str(g.get("group_id", "")).strip():
+                    _merge_item(
+                        str(g.get("group_id")),
+                        str(g.get("group_name") or ""),
+                        bool(g.get("memory_enabled", True)),
+                    )
+
+        # 4. 扫描磁盘旧配置文件
+        config_dirs = [
+            Path("data/config"),
+            Path("AstrBot/data/config"),
+            Path.home() / ".astrbot" / "data" / "config",
+        ]
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_config_path
+            cfg_p = Path(get_astrbot_config_path())
+            if cfg_p not in config_dirs:
+                config_dirs.insert(0, cfg_p)
+        except Exception:
+            pass
+
+        config_filenames = [
+            "astrbot_plugin_isolated_memory_old_config.json",
+            "astrbot_plugin_isolated_memory_config.json",
+            "astrbot_plugin_isolated_session_config.json",
+        ]
+
+        for cd in config_dirs:
+            for fn in config_filenames:
+                cp = cd / fn
+                try:
+                    if cp.is_file():
+                        with open(cp, "r", encoding="utf-8") as f:
+                            old_conf = json.load(f)
+                        if isinstance(old_conf, dict):
+                            # 根级及 basic_settings
+                            all_sources = [
+                                old_conf.get("memory_groups"),
+                                old_conf.get("whitelist_groups"),
+                            ]
+                            if isinstance(old_conf.get("basic_settings"), dict):
+                                all_sources.append(old_conf["basic_settings"].get("memory_groups"))
+                            for src in all_sources:
+                                if isinstance(src, list):
+                                    for g in src:
+                                        if isinstance(g, dict) and str(g.get("group_id", "")).strip():
+                                            _merge_item(
+                                                str(g.get("group_id")),
+                                                str(g.get("group_name") or ""),
+                                                bool(g.get("memory_enabled", True)),
+                                            )
+                except Exception:
+                    pass
+
+        # 5. 合并从历史好感度迁移中检测到的群聊
+        if detected_historical_groups:
+            for gid in detected_historical_groups:
+                gid = str(gid).strip()
+                if gid and gid not in existing_groups_map:
+                    _merge_item(gid, f"历史群聊 {gid}", True)
+
+        merged_list = list(existing_groups_map.values())
+        if not merged_list:
+            return
+
+        # 同步回 self.config (保证 WebUI 读取 memory_groups 能原生匹配模板并展示)
+        if isinstance(self.config, dict):
+            self.config["memory_groups"] = merged_list
+            # 若有旧 basic_settings，同步其 memory_groups 保持兼容
+            if "basic_settings" in self.config and isinstance(self.config["basic_settings"], dict):
+                self.config["basic_settings"]["memory_groups"] = merged_list
+
+            # 平铺提升：如果之前配置保存在 9 大子对象中，提升回根级和 memory
+            for sec_name in (
+                "affinity_settings",
+                "memory_core",
+                "memory_extract",
+                "memory_retrieval",
+                "memory_maintenance",
+                "memory_tools",
+                "memory_rerank",
+                "memory_resonance",
+            ):
+                sec_dict = self.config.get(sec_name)
+                if isinstance(sec_dict, dict):
+                    for sk, sv in sec_dict.items():
+                        if sk.startswith("affinity_") or sk in ("enable_debug_log", "favorability_reset_eval_with_session"):
+                            if sk not in self.config or self.config[sk] is None:
+                                self.config[sk] = sv
+                        else:
+                            if "memory" not in self.config or not isinstance(self.config["memory"], dict):
+                                self.config["memory"] = {}
+                            if sk not in self.config["memory"] or self.config["memory"][sk] is None:
+                                self.config["memory"][sk] = sv
+
+            save_func = getattr(self.config, "save_config", None)
+            if callable(save_func):
+                try:
+                    save_func()
+                    logger.info(
+                        f"[IsolatedMemory] 群设置迁移完成：已同步并持久化 {len(merged_list)} 个群聊设置至 WebUI 配置。"
+                    )
+                except Exception as exc:
+                    logger.debug(f"[IsolatedMemory] 持久化群设置配置失败: {exc}")
+
     def _memory_groups(self) -> list[dict]:
         """启用的群列表：优先本插件 memory_groups，
         兼容旧插件 astrbot_plugin_isolated_session 的 whitelist_groups
-        （直接沿用旧配置内容时无需再手工搬一次）。"""
-        groups = self.config.get("memory_groups") or []
-        if [g for g in groups if isinstance(g, dict) and str(g.get("group_id", ""))]:
-            return [g for g in groups if isinstance(g, dict)]
-        legacy = self.config.get("whitelist_groups") or []
+        以及历史好感度识别的活跃群聊。确保每项包含 __template_key。"""
+        groups = self.config.get("memory_groups")
+        if not groups and isinstance(self.config.get("basic_settings"), dict):
+            groups = self.config["basic_settings"].get("memory_groups")
+        if not groups:
+            groups = self._mcfg("memory_groups", []) or []
+
+        valid_groups = []
+        for g in groups:
+            if isinstance(g, dict) and str(g.get("group_id", "")).strip():
+                item = dict(g)
+                item.setdefault("__template_key", "group_config")
+                valid_groups.append(item)
+
+        if valid_groups:
+            return valid_groups
+
+        legacy = self._mcfg("whitelist_groups", []) or []
         out = []
         for g in legacy:
-            if isinstance(g, dict) and str(g.get("group_id", "")):
+            if isinstance(g, dict) and str(g.get("group_id", "")).strip():
                 out.append({
-                    "group_id": str(g.get("group_id", "")),
+                    "__template_key": "group_config",
+                    "group_id": str(g.get("group_id", "")).strip(),
                     "group_name": str(g.get("group_name", "") or ""),
                     "memory_enabled": bool(g.get("memory_enabled", True)),
                 })
-        return out
+        if out:
+            return out
+
+        # 兜底回退：若配置未保存但已检测到历史群聊，动态允许历史活跃群
+        detected = getattr(
+            getattr(self, "affinity_mgr", None), "detected_legacy_groups", set()
+        )
+        if detected:
+            return [
+                {
+                    "__template_key": "group_config",
+                    "group_id": str(gid).strip(),
+                    "group_name": f"历史群聊 {gid}",
+                    "memory_enabled": True,
+                }
+                for gid in sorted(detected)
+                if str(gid).strip()
+            ]
+        return []
 
     def _group_gate(self, event: AstrMessageEvent) -> dict | None:
         """消息所在群聊在启用列表且允许记忆时返回其配置，否则 None。"""
@@ -561,7 +793,7 @@ class Main(Star):
             return True
         try:
             sender_id = str(event.get_sender_id() or "")
-            admins = self.config.get("admins_id", []) or []
+            admins = self._mcfg("admins_id", []) or []
             if sender_id and sender_id in [str(a) for a in admins]:
                 return True
         except Exception:
@@ -683,18 +915,51 @@ class Main(Star):
 
     # ── 记忆：辅助 ─────────────────────────────────────────────
 
-    def _mcfg(self, key: str, default):
-        """读取记忆配置：优先「memory」分组，兼容旧版扁平键。"""
+    def _mcfg(self, key: str, default: Any = None) -> Any:
+        """自适应多层配置读取：
+        1. 兼容 9 大分区卡片结构
+        2. 经典「memory」分组（对齐 AstrBot 记忆系统核心规范）
+        3. 根级直取（对齐 AstrBot 根级字段规范与单元测试 Mock）
+        4. 兜底遍历任意字典子项
+        """
         try:
-            group = self.config.get("memory")
-            if isinstance(group, dict) and key in group:
-                return group.get(key, default)
+            cfg = self.config
+            if not isinstance(cfg, dict):
+                return default
+
+            # 1. 兼容 9 大分区
+            sections = (
+                "basic_settings",
+                "affinity_settings",
+                "memory_core",
+                "memory_extract",
+                "memory_retrieval",
+                "memory_maintenance",
+                "memory_tools",
+                "memory_rerank",
+                "memory_resonance",
+            )
+            for sec in sections:
+                sub = cfg.get(sec)
+                if isinstance(sub, dict) and key in sub and sub[key] is not None:
+                    return sub[key]
+
+            # 2. 经典 memory 分组
+            mem = cfg.get("memory")
+            if isinstance(mem, dict) and key in mem and mem[key] is not None:
+                return mem[key]
+
+            # 3. 根级直取
+            if key in cfg and cfg[key] is not None:
+                return cfg[key]
+
+            for k, sub in cfg.items():
+                if k not in sections and k != "memory" and isinstance(sub, dict):
+                    if key in sub and sub[key] is not None:
+                        return sub[key]
         except Exception:
             pass
-        try:
-            return self.config.get(key, default)
-        except Exception:
-            return default
+        return default
 
     def _track_task(self, task: asyncio.Task) -> None:
         def _done(_: asyncio.Task) -> None:
@@ -821,7 +1086,7 @@ class Main(Star):
             msg += f"\n已同步清空记忆 {cleared} 条。"
 
         # 8) 好感度联动（若安装了 astrbot_plugin_favorability 则同步清除该人格下的评价）
-        if self.config.get("favorability_reset_eval_with_session", True):
+        if self._mcfg("favorability_reset_eval_with_session", True):
             try:
                 fav_cleared, fav_persona = await FB.clear_favorability_eval(
                     self.context, event

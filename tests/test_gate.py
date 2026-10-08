@@ -199,6 +199,44 @@ class TestGate(unittest.TestCase):
         ids = [g["group_id"] for g in plug._memory_groups()]
         self.assertEqual(ids, ["111"])
 
+    def test_migrate_group_and_plugin_config(self):
+        cfg = {
+            "basic_settings": {"memory_groups": []},
+            "memory_groups": [{"group_id": "1001", "group_name": "群A", "memory_enabled": True}],
+            "whitelist_groups": [{"group_id": "1002", "group_name": "群B", "memory_enabled": False}],
+        }
+        plug = make_plugin(cfg)
+        plug._migrate_group_and_plugin_config(detected_historical_groups={"1003"})
+        
+        # 验证 memory_groups 与 basic_settings.memory_groups 成功合并三方来源且包含 __template_key
+        groups = plug.config["memory_groups"]
+        gid_map = {g["group_id"]: g for g in groups}
+        self.assertIn("1001", gid_map)
+        self.assertIn("1002", gid_map)
+        self.assertIn("1003", gid_map)
+        self.assertEqual(gid_map["1001"]["group_name"], "群A")
+        self.assertEqual(gid_map["1001"]["__template_key"], "group_config")
+        self.assertEqual(gid_map["1002"]["memory_enabled"], False)
+        self.assertEqual(gid_map["1002"]["__template_key"], "group_config")
+        self.assertTrue(gid_map["1003"]["memory_enabled"])
+        self.assertEqual(gid_map["1003"]["__template_key"], "group_config")
+
+    def test_time_injection_in_user_prompt(self):
+        import asyncio
+        from astrbot.api.provider import ProviderRequest
+
+        plug = make_plugin({"affinity_settings": {"affinity_system_time_enabled": True}})
+        req = ProviderRequest(prompt="早安")
+        ev = Ev(group_id="1041386550")
+
+        asyncio.run(plug.on_llm_request(ev, req))
+        self.assertIn("早安", req.prompt)
+        self.assertIn("[当前时间:", req.prompt)
+        # 确认 extra_user_content_parts 中没有包含重复的时间
+        for part in req.extra_user_content_parts:
+            text = getattr(part, "text", "")
+            self.assertNotIn("• 当前时间：", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
