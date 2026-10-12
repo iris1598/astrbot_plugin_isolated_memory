@@ -60,13 +60,13 @@ class TestConfSchema(unittest.TestCase):
         self.assertIn("items", mem)
 
     def test_schema_leaf_fields_count(self):
-        # 9 个根级字段 + memory 下 39 个字段 = 共 48 个配置项
+        # 9 个根级字段 + memory 下 43 个字段 = 共 52 个配置项
         root_fields = [k for k in self.schema.keys() if k != "memory"]
         mem_fields = list(self.schema["memory"]["items"].keys())
         total_fields = root_fields + mem_fields
 
-        self.assertEqual(len(total_fields), 48)
-        self.assertEqual(len(set(total_fields)), 48, "配置项不得有重名")
+        self.assertEqual(len(total_fields), 52)
+        self.assertEqual(len(set(total_fields)), 52, "配置项不得有重名")
 
         # 检查关键字段分布
         self.assertIn("memory_groups", self.schema)

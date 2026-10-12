@@ -833,6 +833,89 @@ class Main(Star):
             pass
         return None
 
+    async def _resolve_session_persona(
+        self, event: AstrMessageEvent
+    ) -> tuple[str, str]:
+        """解析当前会话生效的角色名称与人设提示词。
+
+        Returns:
+            tuple[str, str]: (persona_name, persona_prompt)
+        """
+        umo = event.unified_msg_origin
+        conv_pid = None
+        cm = getattr(self.context, "conversation_manager", None)
+        if cm and hasattr(cm, "get_curr_conversation_id"):
+            try:
+                curr_cid = await cm.get_curr_conversation_id(umo)
+                if curr_cid:
+                    conv = await cm.get_conversation(umo, curr_cid)
+                    if conv:
+                        conv_pid = getattr(conv, "persona_id", None)
+            except Exception as e:
+                logger.debug(f"[IsolatedMemory] 获取会话 persona_id 异常: {e}")
+
+        pm = getattr(self.context, "persona_manager", None)
+        persona_id = conv_pid
+        persona_obj = None
+
+        if pm and hasattr(pm, "resolve_selected_persona"):
+            try:
+                platform_name = (
+                    event.get_platform_name()
+                    if hasattr(event, "get_platform_name")
+                    else ""
+                )
+                cfg = (
+                    getattr(self.context, "get_config", lambda umo=None: {})(umo=umo)
+                    or {}
+                )
+                res = await pm.resolve_selected_persona(
+                    umo=umo,
+                    conversation_persona_id=conv_pid,
+                    platform_name=platform_name,
+                    provider_settings=cfg,
+                )
+                if res and len(res) >= 2:
+                    persona_id = res[0] or persona_id
+                    persona_obj = res[1]
+            except Exception as e:
+                logger.debug(f"[IsolatedMemory] resolve_selected_persona 异常: {e}")
+
+        persona_name = ""
+        persona_prompt = ""
+        if persona_obj:
+            if isinstance(persona_obj, dict):
+                persona_name = persona_obj.get("name") or ""
+                persona_prompt = persona_obj.get("prompt") or persona_obj.get("system_prompt") or ""
+            else:
+                persona_name = getattr(persona_obj, "name", "") or ""
+                persona_prompt = getattr(persona_obj, "prompt", "") or getattr(persona_obj, "system_prompt", "") or ""
+
+        if not persona_prompt and pm and persona_id:
+            if hasattr(pm, "get_persona_v3_by_id"):
+                try:
+                    p3 = pm.get_persona_v3_by_id(persona_id)
+                    if p3:
+                        persona_name = persona_name or p3.get("name") or ""
+                        persona_prompt = p3.get("prompt") or ""
+                except Exception:
+                    pass
+            if not persona_prompt and hasattr(pm, "get_persona"):
+                try:
+                    pdb = await pm.get_persona(persona_id)
+                    if pdb:
+                        persona_name = persona_name or getattr(pdb, "name", "") or ""
+                        persona_prompt = getattr(pdb, "system_prompt", "") or ""
+                except Exception:
+                    pass
+
+        persona_name = str(persona_name or persona_id or "").strip()
+        persona_prompt = str(persona_prompt or "").strip()
+        if not persona_name or persona_name in ("default", "[%None]"):
+            persona_name = "当前角色" if persona_prompt else "伴行者"
+
+        return persona_name, persona_prompt
+
     async def _get_recent_assistant_context(self, owner: str) -> str:
         """获取当前会话上一轮助手的简要回复（用于短文本查询扩展）。"""
         try:
@@ -1768,21 +1851,47 @@ class Main(Star):
             )
             return
 
+        # 解析参数与配置（支持 xxti 文本 / xxti 图 / xxti 20 等）
+        raw_msg = ""
+        if hasattr(event, "get_message_str"):
+            try:
+                raw_msg = str(event.get_message_str() or "")
+            except Exception:
+                pass
+        full_arg = f"{arg} {raw_msg}".strip().lower()
+
+        # 提取动态指定的记忆条数限制（例如 xxti 20, /记忆测评 最近30条 等）
+        cmd_max_entries = 0
+        num_match = re.search(r"(?:^|\s)(?:最近|前)?(\d+)(?:条)?(?:\s|$)", full_arg)
+        if num_match:
+            try:
+                cmd_max_entries = max(0, int(num_match.group(1)))
+            except (ValueError, TypeError):
+                cmd_max_entries = 0
+
         # 优先执行鸣潮角色匹配
         if hasattr(self.memory, "build_character_match"):
-            char_report = await self.memory.build_character_match(entries, umo=owner)
+            session_pname, session_prompt = "", ""
+            if hasattr(self, "_resolve_session_persona"):
+                try:
+                    res_p = self._resolve_session_persona(event)
+                    if asyncio.iscoroutine(res_p) or hasattr(res_p, "__await__"):
+                        session_pname, session_prompt = await res_p
+                    elif isinstance(res_p, (tuple, list)) and len(res_p) == 2:
+                        session_pname, session_prompt = res_p
+                except Exception:
+                    pass
+            char_report = await self.memory.build_character_match(
+                entries,
+                umo=owner,
+                session_persona_name=session_pname,
+                session_persona_prompt=session_prompt,
+                max_entries=cmd_max_entries,
+            )
             if char_report is not None and "top_character" in char_report:
                 if hasattr(event, "stop_event"):
                     event.stop_event()
 
-                # 解析参数与配置（支持 xxti 文本 / xxti 图，兼顾配置项与测试桩）
-                raw_msg = ""
-                if hasattr(event, "get_message_str"):
-                    try:
-                        raw_msg = str(event.get_message_str() or "")
-                    except Exception:
-                        pass
-                full_arg = f"{arg} {raw_msg}".strip().lower()
                 force_text = any(k in full_arg for k in ("文本", "text", "txt", "plain"))
                 force_image = any(k in full_arg for k in ("图", "image", "img", "pic", "海报"))
 

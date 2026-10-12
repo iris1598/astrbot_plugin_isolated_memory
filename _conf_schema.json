@@ -455,6 +455,43 @@
         "condition": {
           "memory_mbti_enabled": true
         }
+      },
+      "character_match_max_memories": {
+        "type": "int",
+        "description": "角色共鸣评测记忆条数上限（0 为全部记忆）",
+        "default": 0,
+        "hint": "参与共鸣分析的最近记忆条数上限。默认 0（使用全部记忆）；若设置为如 30，则仅取最近的 30 条记忆参与比对",
+        "condition": {
+          "memory_mbti_enabled": true
+        }
+      },
+      "character_match_llm_commentary": {
+        "type": "bool",
+        "description": "启用全域共鸣会话角色评语",
+        "default": true,
+        "hint": "是否启用大模型结合当前会话角色人设与近期记忆，在全域角色共鸣度下方生成专属互动评语",
+        "condition": {
+          "memory_mbti_enabled": true
+        }
+      },
+      "character_match_llm_provider_id": {
+        "type": "string",
+        "description": "角色评语指定 LLM 模型（可选）",
+        "default": "",
+        "hint": "生成会话角色评语时使用的大模型 Provider（留空则自动使用当前会话的聊天模型）",
+        "_special": "select_provider",
+        "condition": {
+          "character_match_llm_commentary": true
+        }
+      },
+      "character_match_llm_timeout": {
+        "type": "int",
+        "description": "角色评语 LLM 超时时间 (秒)",
+        "default": 20,
+        "hint": "大模型生成评语的超时秒数，超时自动降级",
+        "condition": {
+          "character_match_llm_commentary": true
+        }
       }
     }
   }

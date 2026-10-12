@@ -383,6 +383,206 @@ quotes:
         quote_empty = await mgr._select_best_quote(char_no_quotes)
         self.assertEqual(quote_empty, "保底座右铭")
 
+    async def test_session_persona_commentary_and_render(self):
+        """验证会话角色评语生成（自定义 LLM / 降级 / 格式化 / 海报卡片自适应）。"""
+        from memory import MemoryManager
+        import character_render
+
+        context = MagicMock()
+        mgr = MemoryManager(context, {
+            "memory": {
+                "character_match_llm_commentary": True,
+                "character_match_llm_provider_id": "custom_provider_123",
+                "character_match_llm_timeout": 15,
+            }
+        })
+
+        top_match = {
+            "name": "长离",
+            "title": "离火弈局的谋定者",
+            "resonance": 92,
+            "evidence": "下棋与布局思考",
+        }
+        rankings = [
+            {"name": "长离", "resonance": 92},
+            {"name": "今汐", "resonance": 80},
+        ]
+        entries = [{"text": "日常记录：今天和朋友下围棋很开心"}]
+
+        # 1. LLM 正常返回评语
+        mgr._llm_chat = AsyncMock(return_value="“测出来原来是长离大人呀，怪不得平日谋略出众！”")
+        remark = await mgr._generate_session_role_commentary(
+            top_match=top_match,
+            rankings=rankings,
+            selected_entries=entries,
+            session_persona_name="折枝",
+            session_persona_prompt="你是鸣潮角色折枝，性格文静内敛，热爱画画。",
+            umo="test_umo",
+        )
+        self.assertIsNotNone(remark)
+        self.assertEqual(remark["persona_name"], "折枝")
+        self.assertEqual(remark["text"], "测出来原来是长离大人呀，怪不得平日谋略出众！")
+
+        # 验证调用 _llm_chat 时透传了自定义 provider_id 与 timeout
+        mgr._llm_chat.assert_called_once()
+        call_kwargs = mgr._llm_chat.call_args.kwargs
+        self.assertEqual(call_kwargs["provider_id"], "custom_provider_123")
+        self.assertEqual(call_kwargs["timeout"], 15)
+
+        # 2. LLM 超时或失败时，平滑降级为保底模版
+        mgr._llm_chat = AsyncMock(return_value=None)
+        fallback_remark = await mgr._generate_session_role_commentary(
+            top_match=top_match,
+            rankings=rankings,
+            selected_entries=entries,
+            session_persona_name="折枝",
+            session_persona_prompt="",
+            umo="test_umo",
+        )
+        self.assertIsNotNone(fallback_remark)
+        self.assertEqual(fallback_remark["persona_name"], "折枝")
+        self.assertIn("长离", fallback_remark["text"])
+        self.assertIn("92%", fallback_remark["text"])
+
+        # 3. 配置关闭时返回 None
+        mgr_disabled = MemoryManager(context, {
+            "memory": {"character_match_llm_commentary": False}
+        })
+        remark_disabled = await mgr_disabled._generate_session_role_commentary(
+            top_match=top_match,
+            rankings=rankings,
+            selected_entries=entries,
+            session_persona_name="折枝",
+        )
+        self.assertIsNone(remark_disabled)
+
+        # 4. 纯文本格式化验证：评语出现在全域角色共鸣度分布下方
+        mock_report = {
+            "top_character": top_match,
+            "rankings": rankings,
+            "commentary": "常规特质解析",
+            "session_persona_remark": remark,
+            "sample_count": 5,
+            "used_count": 5,
+        }
+        text = mgr.format_character_report(mock_report)
+        self.assertIn("✦ 全域角色共鸣度分布：", text)
+        self.assertIn("✦ 【折枝】的共鸣简评：", text)
+        self.assertIn("测出来原来是长离大人呀", text)
+        # 确认评语在分布之后
+        pos_dist = text.index("✦ 全域角色共鸣度分布：")
+        pos_remark = text.index("✦ 【折枝】的共鸣简评：")
+        self.assertGreater(pos_remark, pos_dist)
+
+        # 5. 海报图片渲染验证：含有 session_persona_remark 时成功出图且高度适配延伸
+        poster_path = character_render.render_character_resonance_poster(mock_report)
+        self.assertIsNotNone(poster_path)
+        self.assertTrue(poster_path.exists())
+        from PIL import Image
+        with Image.open(poster_path) as img:
+            self.assertEqual(img.size[0], 880)
+            self.assertGreater(img.size[1], 1260)  # 高度自适应延伸
+        poster_path.unlink(missing_ok=True)
+
+    async def test_character_match_max_memories_selection(self):
+        """验证最多最近 N 条记忆参数与配置项截取逻辑。"""
+        from memory import MemoryManager
+
+        context = MagicMock()
+        mgr = MemoryManager(context, {
+            "memory": {
+                "character_match_max_memories": 2,
+            }
+        })
+
+        mock_kb = MagicMock()
+        mock_kb.kb.embedding_provider_id = "test_ep"
+        mock_ep = MagicMock()
+        mock_ep.get_embeddings = AsyncMock(side_effect=lambda texts: [[0.1, 0.1, 0.1]] * len(texts))
+        mock_kb.get_ep = AsyncMock(return_value=mock_ep)
+        mgr.ensure_kb = AsyncMock(return_value=mock_kb)
+
+        entries = [
+            {"text": "记忆1（最新）", "updated_at": 400},
+            {"text": "记忆2", "updated_at": 300},
+            {"text": "记忆3", "updated_at": 200},
+            {"text": "记忆4（最旧）", "updated_at": 100},
+        ]
+
+        # 1. 默认 max_entries=0 时读取配置项 character_match_max_memories (2条)
+        report = await mgr.build_character_match(entries)
+        self.assertIsNotNone(report)
+        self.assertEqual(report["sample_count"], 4)
+        self.assertEqual(report["used_count"], 2)
+        self.assertTrue(report["truncated"])
+
+        # 2. 动态指定 max_entries=3 覆盖配置
+        report3 = await mgr.build_character_match(entries, max_entries=3)
+        self.assertIsNotNone(report3)
+        self.assertEqual(report3["sample_count"], 4)
+        self.assertEqual(report3["used_count"], 3)
+        self.assertTrue(report3["truncated"])
+
+        # 3. 动态指定 max_entries=10 大于总条数
+        report_all = await mgr.build_character_match(entries, max_entries=10)
+        self.assertIsNotNone(report_all)
+        self.assertEqual(report_all["sample_count"], 4)
+        self.assertEqual(report_all["used_count"], 4)
+        self.assertFalse(report_all["truncated"])
+
+        # 4. 纯文本格式验证：截断时提示“共 4 条记忆，取最近 2 条参与比对”
+        text_truncated = mgr.format_character_report(report)
+        self.assertIn("共 4 条记忆，取最近 2 条参与比对", text_truncated)
+
+        # 未截断时提示“基于全部 4 条长期记忆推测生成”
+        text_full = mgr.format_character_report(report_all)
+        self.assertIn("基于全部 4 条长期记忆推测生成", text_full)
+
+    async def test_cmd_memory_mbti_dynamic_count_arg(self):
+        """验证命令中传递动态条数（如 xxti 20, /记忆测评 最近10条）的透传。"""
+        mod = test_gate.load_memory_main()
+        Main = mod.Main
+
+        context = MagicMock()
+        context.kb_manager = MagicMock()
+        config = {
+            "memory": {
+                "memory_enabled": True,
+                "memory_kb_name": ["mock_kb"],
+                "memory_mbti_min_memories": 3,
+                "character_match_output_mode": "text",
+            }
+        }
+        plugin = Main(context, config)
+        plugin._gate_block_reason = lambda ev: None
+        plugin._ensure_memory = AsyncMock(return_value=MagicMock())
+
+        plugin.memory = MagicMock()
+        plugin.memory.collect_memory_entries = AsyncMock(
+            return_value=[{"text": f"m{i}", "updated_at": 100} for i in range(10)]
+        )
+        plugin.memory.build_character_match = AsyncMock(return_value={
+            "top_character": {"name": "长离", "resonance": 90, "tags": []},
+            "rankings": [],
+            "commentary": "评语",
+            "sample_count": 10,
+            "used_count": 3,
+            "truncated": True,
+        })
+        plugin.memory.format_character_report = MagicMock(return_value="共鸣报告文本")
+
+        event = MagicMock()
+        event.unified_msg_origin = "Iris:GroupMessage:10086_123"
+        event.plain_result = lambda msg: ("PLAIN", msg)
+        event.get_message_str = MagicMock(return_value="xxti 3")
+
+        results = [res async for res in plugin.cmd_memory_mbti(event, "3")]
+        self.assertEqual(len(results), 1)
+        # 验证 build_character_match 被调用时透传了 max_entries=3
+        plugin.memory.build_character_match.assert_called_once()
+        call_kwargs = plugin.memory.build_character_match.call_args.kwargs
+        self.assertEqual(call_kwargs["max_entries"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

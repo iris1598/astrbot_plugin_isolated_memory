@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import re
@@ -201,6 +202,109 @@ def _draw_sparkle(
     draw.polygon(points, fill=fill)
 
 
+NO_START_PUNCTUATION = set("，。！？、：；”’）》〉】〕｝…—~～,.!?;:'\")>]}")
+NO_END_PUNCTUATION = set("“‘（《〈【〔｛([{<“‘")
+
+
+def _wrap_text_cjk(
+    text: str,
+    font: Any,
+    max_width: float,
+    draw: Any,
+) -> list[str]:
+    """对中文/英文混排文本进行高保真排版折行（基于实际像素宽度、避头尾法则与智能行平衡）。"""
+    if not text:
+        return []
+
+    result_lines = []
+    paragraphs = text.split("\n")
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+
+        total_w = draw.textlength(para, font=font)
+        if total_w <= max_width:
+            result_lines.append(para)
+            continue
+
+        # 计算理想行数与每行目标宽度，进行视觉平衡（防止末行出现仅几个字的孤行）
+        est_lines = max(2, math.ceil(total_w / max_width))
+        target_width = max(max_width * 0.75, total_w / est_lines)
+
+        lines: list[str] = []
+        cur_line = ""
+        chars = list(para)
+        idx = 0
+        while idx < len(chars):
+            ch = chars[idx]
+            cand = cur_line + ch
+            cand_w = draw.textlength(cand, font=font)
+
+            is_break_punct = ch in "，。！？；" and (idx + 1 < len(chars))
+            should_break = False
+
+            if cand_w > max_width:
+                should_break = True
+            elif is_break_punct and cand_w >= target_width and (len(lines) + 1 < est_lines):
+                cur_line = cand
+                idx += 1
+                lines.append(cur_line)
+                cur_line = ""
+                continue
+
+            if should_break:
+                if cur_line:
+                    # 检查行尾禁则：如果行尾是开引号/开括号，移到下一行
+                    if cur_line[-1] in NO_END_PUNCTUATION:
+                        ch_m = cur_line[-1]
+                        cur_line = cur_line[:-1]
+                        lines.append(cur_line)
+                        cur_line = ch_m + ch
+                        idx += 1
+                        continue
+
+                    # 检查行首禁则：如果当前待放置的字符是禁止行首字符（如逗号、句号）
+                    if ch in NO_START_PUNCTUATION:
+                        # 如果容差允许（不超过 max_width + 16），直接放入本行行尾
+                        if cand_w <= max_width + 16:
+                            cur_line = cand
+                            idx += 1
+                            lines.append(cur_line)
+                            cur_line = ""
+                            continue
+                        else:
+                            # 容差不够，把前一个字符回退移到下一行，与标点作伴
+                            prev_ch = cur_line[-1]
+                            cur_line = cur_line[:-1]
+                            lines.append(cur_line)
+                            cur_line = prev_ch + ch
+                            idx += 1
+                            continue
+
+                    lines.append(cur_line)
+                    cur_line = ch
+                else:
+                    cur_line = ch
+            else:
+                cur_line = cand
+            idx += 1
+
+        if cur_line:
+            lines.append(cur_line)
+
+        # 孤行吸收/微调（如果最后一行只有 <= 5 个字符，且倒数第二行空间允许，进行合并）
+        if len(lines) >= 2 and len(lines[-1]) <= 5:
+            combined = lines[-2] + lines[-1]
+            if draw.textlength(combined, font=font) <= max_width:
+                lines[-2] = combined
+                lines.pop()
+
+        result_lines.extend(lines)
+
+    return result_lines
+
+
 def render_character_resonance_poster(
     report: dict[str, Any],
     custom_dir: Path | str | None = None,
@@ -240,8 +344,59 @@ def render_character_resonance_poster(
 
         used_count = report.get("used_count", 0)
 
-        # 画布尺寸
-        W, H = 880, 1260
+        # 画布基础尺寸 (宽固定 880，文本最大安全可用宽度 744)
+        W = 880
+        text_max_w = W - 88 - 48  # 744px
+
+        # 使用轻量 dummy draw 进行排版预计算
+        dummy_img = Image.new("RGBA", (1, 1))
+        dummy_draw = ImageDraw.Draw(dummy_img)
+
+        # 1. 预排版 Card 5（共鸣解析卡片）
+        commentary_font = _get_font(17, bold=False)
+        commentary_lines = _wrap_text_cjk(
+            commentary, commentary_font, text_max_w, dummy_draw
+        )
+        quote_text = str(
+            top.get("selected_quote")
+            or top.get("quote")
+            or tagline
+        ).strip()
+        bubble_h = max(130, 42 + len(commentary_lines) * 32 + (40 if quote_text else 16))
+
+        # 2. 预排版 Card 6.5（当前会话角色专属互动评语卡片）
+        session_remark = report.get("session_persona_remark")
+        remark_text = ""
+        remark_pname = "当前角色"
+        if isinstance(session_remark, dict):
+            remark_text = str(session_remark.get("text") or "").strip()
+            remark_pname = str(session_remark.get("persona_name") or "当前角色").strip()
+
+        remark_lines = []
+        remark_box_h = 0
+        if remark_text:
+            remark_font = _get_font(16, bold=False)
+            remark_lines = _wrap_text_cjk(
+                remark_text, remark_font, text_max_w, dummy_draw
+            )
+            remark_box_h = max(110, 42 + len(remark_lines) * 30 + 16)
+
+        # 3. 动态计算总画布高度 H
+        hero_card_top = 108
+        hero_card_h = 370
+        bubble_top = hero_card_top + hero_card_h + 20
+        dist_top = bubble_top + bubble_h + 24
+        dist_h = 390
+        if remark_lines:
+            remark_top = dist_top + dist_h + 24
+            last_bottom = remark_top + remark_box_h
+        else:
+            last_bottom = dist_top + dist_h
+
+        # 预留底部 footer 区域 (84px + 30px 下边距)
+        H = last_bottom + 114
+
+        # 创建高保真画布
         canvas = Image.new("RGBA", (W, H), (255, 241, 226, 255))
         draw = ImageDraw.Draw(canvas)
 
@@ -427,7 +582,7 @@ def render_character_resonance_poster(
 
         # 称号胶囊
         if title:
-            title_w = len(title) * 16 + 26
+            title_w = int(draw.textlength(title, font=_get_font(13, bold=True))) + 26
             _draw_rounded_rect(
                 draw,
                 (info_x, cur_y, info_x + title_w, cur_y + 26),
@@ -480,7 +635,7 @@ def render_character_resonance_poster(
         cur_y += 74
         tag_x = info_x
         for tag in tags[:4]:
-            tag_w = len(tag) * 16 + 22
+            tag_w = int(draw.textlength(tag, font=_get_font(13, bold=True))) + 22
             _draw_rounded_rect(
                 draw,
                 (tag_x, cur_y, tag_x + tag_w, cur_y + 30),
@@ -510,8 +665,6 @@ def render_character_resonance_poster(
             )
 
         # 5. 中间：漫画气泡风格的共鸣解析（纯白实心无透明度底板）
-        bubble_top = hero_card_top + hero_card_h + 20
-        bubble_h = 170
         bubble_box = (44, bubble_top, W - 44, bubble_top + bubble_h)
 
         _draw_rounded_rect(
@@ -550,11 +703,9 @@ def render_character_resonance_poster(
             fill=(255, 255, 255, 255),
         )
 
-        # 共鸣解析正文（按宽度折行）
-        commentary_y = bubble_top + 32
-        max_line_chars = 34
-        for i in range(0, len(commentary), max_line_chars):
-            line = commentary[i : i + max_line_chars]
+        # 共鸣解析正文（按高保真自适应像素折行绘制）
+        commentary_y = bubble_top + 34
+        for line in commentary_lines:
             draw.text(
                 (bubble_box[0] + 24, commentary_y),
                 line,
@@ -564,16 +715,16 @@ def render_character_resonance_poster(
             commentary_y += 32
 
         # 金句引述条
-        quote_text = str(
-            top.get("selected_quote")
-            or top.get("quote")
-            or tagline
-        ).strip()
         if quote_text:
-            quote_y = bubble_top + bubble_h - 40
-            display_quote = (
-                f"{quote_text[:40]}..." if len(quote_text) > 42 else quote_text
-            )
+            quote_y = bubble_top + bubble_h - 38
+            display_quote = quote_text
+            if draw.textlength(f"核心共振语：{display_quote}", font=_get_font(14, bold=True)) > text_max_w:
+                while (
+                    display_quote
+                    and draw.textlength(f"核心共振语：{display_quote}...", font=_get_font(14, bold=True)) > text_max_w
+                ):
+                    display_quote = display_quote[:-1]
+                display_quote = f"{display_quote}..."
             draw.text(
                 (bubble_box[0] + 24, quote_y),
                 f"核心共振语：{display_quote}",
@@ -684,9 +835,70 @@ def render_character_resonance_poster(
 
             row_y += 64
 
+        # 6.5 下部：当前会话角色专属互动评语卡片（紧随全域角色分布卡片下方）
+        if remark_lines:
+            remark_top = dist_top + dist_h + 24
+            remark_box = (44, remark_top, W - 44, remark_top + remark_box_h)
+
+            _draw_rounded_rect(
+                draw,
+                remark_box,
+                radius=22,
+                fill=(255, 255, 255, 255),
+                outline=(238, 76, 90, 255),
+                width=2,
+            )
+
+            badge_title = f"【{remark_pname}】共鸣简评"
+            badge_w = max(180, int(draw.textlength(badge_title, font=_get_font(14, bold=True))) + 46)
+            badge_box = (
+                remark_box[0] + 20,
+                remark_top - 14,
+                remark_box[0] + 20 + badge_w,
+                remark_top + 18,
+            )
+            _draw_rounded_rect(
+                draw,
+                badge_box,
+                radius=16,
+                fill=(206, 41, 75, 255),
+            )
+            _draw_sparkle(
+                draw,
+                badge_box[0] + 18,
+                (badge_box[1] + badge_box[3]) / 2,
+                radius=5,
+                fill=(255, 255, 255, 255),
+            )
+            draw.text(
+                (badge_box[0] + 28, badge_box[1] + 5),
+                badge_title,
+                font=_get_font(14, bold=True),
+                fill=(255, 255, 255, 255),
+            )
+
+            line_y = remark_top + 36
+            for line in remark_lines:
+                draw.text(
+                    (remark_box[0] + 24, line_y),
+                    line,
+                    font=_get_font(16, bold=False),
+                    fill=(66, 24, 38, 255),
+                )
+                line_y += 30
+
         # 7. 底部说明
         footer_y = H - 84
-        sample_label = f"• 样本依据：基于最近 {used_count} 条长期记忆推测生成"
+        sample_count = report.get("sample_count", 0)
+        truncated = report.get("truncated", False)
+        if truncated and sample_count > used_count:
+            sample_label = f"• 样本依据：共 {sample_count} 条记忆，取最近 {used_count} 条参与比对"
+        else:
+            sample_label = (
+                f"• 样本依据：基于全部 {used_count} 条长期记忆推测生成"
+                if used_count > 0
+                else "• 样本依据：基于长期记忆推测生成"
+            )
         draw.text(
             (44, footer_y),
             sample_label,

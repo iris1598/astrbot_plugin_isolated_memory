@@ -2752,41 +2752,50 @@ class MemoryManager:
             return MBTI_ANCHOR_THRESHOLD
         return max(0.0, value)
 
-    def _select_entries(self, entries: list[dict]) -> tuple[list[dict], bool]:
-        """按字符上限截取记忆条目（入参已按最近使用时间排序）。
+    def _select_entries(
+        self, entries: list[dict], max_entries: int = 0
+    ) -> tuple[list[dict], bool]:
+        """按记忆条数上限与字符上限截取记忆条目（入参已按最近使用时间排序）。
 
         Args:
             entries: collect_memory_entries 的返回值。
+            max_entries: 最多选取的最近记忆条数（<=0 表示不限制条数）。
 
         Returns:
             tuple[list[dict], bool]: (参与分析的条目, 是否发生截断)。
         """
         cap = self._mbti_max_chars()
+        candidate_entries = entries
+        count_truncated = False
+        if max_entries > 0 and len(entries) > max_entries:
+            candidate_entries = entries[:max_entries]
+            count_truncated = True
+
         picked: list[dict] = []
         used = 0
-        truncated = False
-        for entry in entries:
+        char_truncated = False
+        for entry in candidate_entries:
             text = (entry.get("text") or "").strip()
             if not text:
                 continue
             if used + len(text) > cap:
-                truncated = True
+                char_truncated = True
                 break
             picked.append({"text": text, "updated_at": entry.get("updated_at")})
             used += len(text)
         if not picked:
             # 单条记忆就超过上限时至少保留它，避免直接放弃分析
-            first = next((e for e in entries if (e.get("text") or "").strip()), None)
+            first = next((e for e in candidate_entries if (e.get("text") or "").strip()), None)
             if first is None:
-                return [], False
+                return [], count_truncated
             picked = [
                 {
                     "text": (first.get("text") or "").strip()[:cap],
                     "updated_at": first.get("updated_at"),
                 }
             ]
-            truncated = True
-        return picked, truncated
+            char_truncated = True
+        return picked, (count_truncated or char_truncated)
 
     def _select_texts(self, texts: list[str]) -> tuple[list[str], bool]:
         """按字符上限截取记忆文本（入参已按最近使用时间排序）。
@@ -3162,10 +3171,21 @@ class MemoryManager:
         return char_anchors
 
     async def build_character_match(
-        self, entries: list[dict], umo: str = ""
+        self,
+        entries: list[dict],
+        umo: str = "",
+        session_persona_name: str = "",
+        session_persona_prompt: str = "",
+        max_entries: int = 0,
     ) -> dict | None:
-        """基于长期记忆计算鸣潮角色契合度档案（纯向量确定性匹配，可选 LLM 评语）。"""
-        selected, truncated = self._select_entries(entries)
+        """基于长期记忆计算鸣潮角色契合度档案（纯向量确定性匹配，结合会话人设 LLM 评语）。"""
+        if max_entries <= 0:
+            try:
+                max_entries = max(0, int(self._cfg("character_match_max_memories", 0) or 0))
+            except (ValueError, TypeError):
+                max_entries = 0
+
+        selected, truncated = self._select_entries(entries, max_entries=max_entries)
         if not selected:
             return None
 
@@ -3280,10 +3300,21 @@ class MemoryManager:
         # 依据最匹配角色的特质与选定的经典台词直接生成共鸣评语（0 Token 零开销，无需调用大模型）
         commentary = self._default_commentary(top_match)
 
+        # 由当前会话生效角色人设对用户的测试结果与近期记忆生成深度互动评语（支持自定义 LLM 与超时）
+        session_persona_remark = await self._generate_session_role_commentary(
+            top_match=top_match,
+            rankings=rankings,
+            selected_entries=selected,
+            session_persona_name=session_persona_name,
+            session_persona_prompt=session_persona_prompt,
+            umo=umo,
+        )
+
         return {
             "top_character": top_match,
             "rankings": rankings,
             "commentary": commentary,
+            "session_persona_remark": session_persona_remark,
             "sample_count": len(entries),
             "used_count": len(selected),
             "truncated": truncated,
@@ -3329,6 +3360,110 @@ class MemoryManager:
 
         # 2. 降级：从经典台词库中随机抽取
         return random.choice(candidates)
+
+    async def _generate_session_role_commentary(
+        self,
+        top_match: dict,
+        rankings: list[dict],
+        selected_entries: list[dict],
+        session_persona_name: str = "",
+        session_persona_prompt: str = "",
+        umo: str = "",
+    ) -> dict | None:
+        """调用自定义/当前 LLM，以当前会话生效的角色人设为漂泊者的测试结果生成互动评语。
+
+        Returns:
+            dict | None: {"persona_name": str, "text": str} 或 None（未启用时）。
+        """
+        enable_llm = bool(self._cfg("character_match_llm_commentary", True))
+        if not enable_llm:
+            return None
+
+        persona_name = str(session_persona_name or "").strip()
+        if not persona_name or persona_name in ("default", "[%None]"):
+            persona_name = "当前角色" if session_persona_prompt else "伴行者"
+
+        top_name = str(top_match.get("name") or "未知角色")
+        top_title = str(top_match.get("title") or "")
+        top_res = int(top_match.get("resonance") or 50)
+        evidence = _clip_text(str(top_match.get("evidence") or ""), 80)
+        top_k_str = "、".join(
+            [f"{r.get('name')}({r.get('resonance')}%)" for r in rankings[:3]]
+        )
+
+        # 提取近期具有代表性的记忆片段
+        mem_snippets = []
+        for e in selected_entries[:6]:
+            txt = str(e.get("text") or "").strip()
+            if txt:
+                mem_snippets.append(f"- {_clip_text(txt, 70)}")
+        memories_text = (
+            "\n".join(mem_snippets) if mem_snippets else "- 暂无详细日常记录"
+        )
+
+        system_instruction = (
+            session_persona_prompt.strip()
+            if session_persona_prompt and session_persona_prompt.strip()
+            else f"你是陪伴漂泊者（用户）日常对话的亲密伙伴【{persona_name}】。"
+        )
+
+        prompt = (
+            f"【系统设定与角色身份】\n"
+            f"{system_instruction}\n\n"
+            f"【对话场景背景】\n"
+            f"与你对话的漂泊者（用户）刚刚在会话中完成了一次基于其近期记忆的鸣潮心智共鸣度测试（xxti）。\n"
+            f"- 对方测出的核心契合角色：【{top_name}】{f'（{top_title}）' if top_title else ''}，契合度 {top_res}%\n"
+            f"- 全域共鸣度前列分布：{top_k_str}\n"
+            f"- 最契合该角色的记忆依据：‘{evidence}’\n\n"
+            f"【对方近期的真实日常记忆片段】\n"
+            f"{memories_text}\n\n"
+            f"【你的任务】\n"
+            f"请以你当前的角色身份（严格保持你的人设口吻、性格特质、与用户的互动称呼及说话习惯），针对对方测出的这个共鸣结果以及他近期的生活记录，对他说一段 2~3 句话（80~120 字）的真实评价/互动评语。\n\n"
+            f"【要求】\n"
+            f"1. 必须完全符合你当前扮演角色的性格风格；\n"
+            f"2. 结合对方测出的角色（{top_name}）以及对方的近期经历，表达你的看法或感想；\n"
+            f"3. 直接输出你对对方说的话，严禁包含任何前缀、标题、剧本说明、括号心理活动或引号。"
+        )
+
+        provider_id = (
+            str(self._cfg("character_match_llm_provider_id", "") or "").strip()
+            or str(self._cfg("memory_mbti_provider_id", "") or "").strip()
+        )
+        timeout = float(self._cfg("character_match_llm_timeout", 20) or 20)
+
+        try:
+            result = await self._llm_chat(
+                prompt=prompt,
+                provider_id=provider_id,
+                timeout=timeout,
+                umo=umo,
+            )
+            if result and len(result.strip()) > 5:
+                cleaned = (
+                    result.strip()
+                    .strip('"')
+                    .strip("“")
+                    .strip("”")
+                    .strip("'")
+                    .strip("‘")
+                    .strip("’")
+                )
+                return {
+                    "persona_name": persona_name,
+                    "text": cleaned,
+                }
+        except Exception as e:
+            logger.debug(f"[IsolatedMemory] 生成会话角色评语异常: {e}")
+
+        # 降级保底：若 LLM 未返回或超时，生成优雅预制模版
+        fallback_text = (
+            f"看到你在记忆测试中与【{top_name}】达成高达 {top_res}% 的心智共鸣，"
+            f"回想起你近期记录的那些经历与点滴，确实能感受到你身上这份独特而耀眼的心智特质。漫漫旅途，期待继续与你并肩同行！"
+        )
+        return {
+            "persona_name": persona_name,
+            "text": fallback_text,
+        }
 
     def _generate_character_commentary(
         self, top_match: dict, umo: str = ""
@@ -3397,11 +3532,18 @@ class MemoryManager:
                 bar = _mbti_bar(r_res, width=10)
                 lines.append(f"• {pad_name} {bar} {r_res}%")
 
+        session_remark = report.get("session_persona_remark")
+        if isinstance(session_remark, dict) and session_remark.get("text"):
+            p_name = session_remark.get("persona_name") or "当前角色"
+            p_text = session_remark.get("text")
+            lines += ["", f"✦ 【{p_name}】的共鸣简评：", f"“{p_text}”"]
+
         sample = report.get("sample_count", 0)
         used = report.get("used_count", 0)
-        detail = f"基于最近 {used} 条长期记忆推测生成"
-        if report.get("truncated"):
+        if report.get("truncated") and sample > used:
             detail = f"共 {sample} 条记忆，取最近 {used} 条参与比对"
+        else:
+            detail = f"基于全部 {used} 条长期记忆推测生成" if used > 0 else "基于长期记忆推测生成"
         lines += ["", f"✦ 样本依据：{detail}"]
         lines.append("⚠️ 本档案由记忆向量与角色特质比对生成，仅供娱乐参考。")
 
