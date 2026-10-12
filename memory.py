@@ -21,6 +21,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import shutil
 import time
@@ -549,6 +550,8 @@ class MemoryManager:
         self._anchor_cache: dict[str, dict[str, list[list[float]]]] = {}
         # provider + 角色列表 -> 角色锚点句向量缓存
         self._character_anchor_cache: dict[str, dict[str, list[list[float]]]] = {}
+        # provider + 角色台词 -> 角色经典台词嵌入向量缓存
+        self._character_quote_cache: dict[str, list[list[float]]] = {}
 
     # ── 配置读取 ───────────────────────────────────────────────
 
@@ -3210,6 +3213,7 @@ class MemoryManager:
             weighted_sim_sum = 0.0
             best_mem_sim = -1.0
             best_mem_text = ""
+            best_mem_vec: list[float] | None = None
 
             for (entry, m_vec, w) in zip(selected, memory_vectors, weights):
                 max_sim = 0.0
@@ -3222,12 +3226,14 @@ class MemoryManager:
                 if max_sim > best_mem_sim:
                     best_mem_sim = max_sim
                     best_mem_text = entry["text"]
+                    best_mem_vec = m_vec
 
             raw_score = weighted_sim_sum / sum_w
             scored_chars.append({
                 "char": char,
                 "raw_score": raw_score,
                 "evidence": best_mem_text,
+                "evidence_vec": best_mem_vec,
             })
 
         if not scored_chars:
@@ -3245,11 +3251,15 @@ class MemoryManager:
                 resonance = _clamp_int(rel * 92, 15, 96, 50)
             else:
                 resonance = 50
+            char_quotes = list(c.quotes) if c.quotes else ([c.tagline] if c.tagline else [])
             rankings.append({
                 "id": c.id,
                 "name": c.name,
                 "title": c.title,
                 "tagline": c.tagline,
+                "quotes": char_quotes,
+                "quote": c.tagline or (char_quotes[0] if char_quotes else ""),
+                "selected_quote": c.tagline or (char_quotes[0] if char_quotes else ""),
                 "tags": c.tags,
                 "desc": c.desc,
                 "resonance": resonance,
@@ -3257,8 +3267,17 @@ class MemoryManager:
             })
 
         top_match = rankings[0]
+        top_char = scored_chars[0]["char"]
+        chosen_quote = await self._select_best_quote(
+            top_char,
+            target_vec=scored_chars[0].get("evidence_vec"),
+            kb=kb,
+        )
+        if chosen_quote:
+            top_match["quote"] = chosen_quote
+            top_match["selected_quote"] = chosen_quote
 
-        # 依据最匹配角色的特质与金句直接生成共鸣评语（0 Token 零开销，无需调用大模型）
+        # 依据最匹配角色的特质与选定的经典台词直接生成共鸣评语（0 Token 零开销，无需调用大模型）
         commentary = self._default_commentary(top_match)
 
         return {
@@ -3270,6 +3289,47 @@ class MemoryManager:
             "truncated": truncated,
         }
 
+    async def _select_best_quote(
+        self,
+        char: CharacterProfile,
+        target_vec: list[float] | None = None,
+        kb: KBHelper | None = None,
+    ) -> str:
+        """为共鸣角色挑选最契合的经典台词（语义向量匹配 + 随机降级）。"""
+        candidates = [str(q).strip() for q in (char.quotes or []) if str(q).strip()]
+        if not candidates:
+            return str(char.tagline or "").strip()
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # 1. 尝试使用向量语义比对用户记忆与各句台词的共鸣契合度
+        if target_vec is not None and kb is not None:
+            try:
+                provider_id = str(getattr(kb.kb, "embedding_provider_id", "") or "")
+                char_key = f"{provider_id}::{char.id}::{len(candidates)}"
+                q_vectors = self._character_quote_cache.get(char_key)
+                if q_vectors is None or len(q_vectors) != len(candidates):
+                    provider = await kb.get_ep()
+                    q_vectors = await provider.get_embeddings(candidates)
+                    if q_vectors and len(q_vectors) == len(candidates):
+                        self._character_quote_cache[char_key] = q_vectors
+                    else:
+                        q_vectors = None
+
+                if q_vectors and len(q_vectors) == len(candidates):
+                    scores = [_cosine(target_vec, qv) for qv in q_vectors]
+                    max_score = max(scores)
+                    best_indices = [
+                        i for i, s in enumerate(scores) if abs(s - max_score) < 1e-5
+                    ]
+                    chosen_idx = random.choice(best_indices)
+                    return candidates[chosen_idx]
+            except Exception as e:
+                logger.debug(f"[IsolatedMemory] 角色台词语义匹配异常，降级随机选取: {e}")
+
+        # 2. 降级：从经典台词库中随机抽取
+        return random.choice(candidates)
+
     def _generate_character_commentary(
         self, top_match: dict, umo: str = ""
     ) -> str:
@@ -3279,10 +3339,14 @@ class MemoryManager:
     @staticmethod
     def _default_commentary(top_match: dict) -> str:
         tags_str = " · ".join(top_match.get("tags", [])[:3])
-        tagline = top_match.get("tagline", "")
+        quote = (
+            top_match.get("selected_quote")
+            or top_match.get("quote")
+            or top_match.get("tagline", "")
+        )
         name = top_match.get("name", "")
-        if tagline:
-            return f"你在日常记录中展现出【{tags_str}】的心智特质，与【{name}】的心智同频共振。正如其言：‘{tagline}’"
+        if quote:
+            return f"你在日常记录中展现出【{tags_str}】的心智特质，与【{name}】的心智同频共振。正如其言：‘{quote}’"
         return f"你在日常对话与记录中展现出【{tags_str}】的精神特质，与【{name}】的心智频率高度同调。"
 
     def format_character_report(self, report: dict, top_k: int = 5) -> str:
@@ -3297,6 +3361,11 @@ class MemoryManager:
         resonance = top.get("resonance", 0)
         tagline = top.get("tagline", "")
         title = top.get("title", "")
+        quote_text = str(
+            top.get("selected_quote")
+            or top.get("quote")
+            or ""
+        ).strip()
         tags = top.get("tags") or []
         commentary = report.get("commentary", "")
         rankings = (report.get("rankings") or [])[: max(1, top_k)]
@@ -3310,6 +3379,8 @@ class MemoryManager:
             lines.append(f"✦ 角色定位：{title}")
         if tagline:
             lines.append(f"「{tagline}」")
+        if quote_text and quote_text != tagline:
+            lines.append(f"✦ 共鸣台词：{quote_text}")
 
         if tags:
             lines += ["", f"✦ 特质契合：{' · '.join(tags)}"]

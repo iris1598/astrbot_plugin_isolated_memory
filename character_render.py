@@ -564,11 +564,19 @@ def render_character_resonance_poster(
             commentary_y += 32
 
         # 金句引述条
-        if tagline:
+        quote_text = str(
+            top.get("selected_quote")
+            or top.get("quote")
+            or tagline
+        ).strip()
+        if quote_text:
             quote_y = bubble_top + bubble_h - 40
+            display_quote = (
+                f"{quote_text[:40]}..." if len(quote_text) > 42 else quote_text
+            )
             draw.text(
                 (bubble_box[0] + 24, quote_y),
-                f"核心共振语：{tagline}",
+                f"核心共振语：{display_quote}",
                 font=_get_font(14, bold=True),
                 fill=(190, 60, 75, 255),
             )

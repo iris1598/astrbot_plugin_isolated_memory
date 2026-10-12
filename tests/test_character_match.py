@@ -124,6 +124,10 @@ quotes:
         self.assertEqual(top["name"], "爱弥斯")
         self.assertGreater(top["resonance"], 70)
         self.assertTrue(len(report["rankings"]) >= 5)
+        self.assertIn("quotes", top)
+        self.assertIn("selected_quote", top)
+        self.assertTrue(len(top["quotes"]) >= 1)
+        self.assertIn(top["selected_quote"], top["quotes"])
         # 确认排行榜降序排列
         resonances = [r["resonance"] for r in report["rankings"]]
         self.assertEqual(resonances, sorted(resonances, reverse=True))
@@ -313,6 +317,71 @@ quotes:
             self.assertEqual(len(chars), 1)
             self.assertEqual(chars[0].name, "忌炎")
             self.assertEqual(chars[0].id, "jiyan")
+
+    async def test_character_quote_semantic_and_fallback(self):
+        """验证角色多台词语义向量匹配选择与降级随机选择。"""
+        from memory import MemoryManager
+
+        context = MagicMock()
+        mgr = MemoryManager(context, {})
+
+        char = self.CharacterProfile(
+            id="test_char",
+            name="测试角色",
+            tagline="第一句台词",
+            quotes=[
+                "第一句台词：平凡度日",
+                "第二句台词：向往探索浩瀚星空与宇宙真理",
+                "第三句台词：战斗到底永不退缩",
+            ],
+            anchors=["锚点"],
+        )
+
+        mock_kb = MagicMock()
+        mock_kb.kb.embedding_provider_id = "test_provider"
+        mock_ep = MagicMock()
+
+        # 模拟嵌入向量：星空/探索 -> [1.0, 0.0]；战斗 -> [0.0, 1.0]；其他 -> [0.1, 0.1]
+        async def fake_get_embeddings(texts):
+            vectors = []
+            for t in texts:
+                if "星空" in t or "探索" in t:
+                    vectors.append([1.0, 0.0])
+                elif "战斗" in t or "退缩" in t:
+                    vectors.append([0.0, 1.0])
+                else:
+                    vectors.append([0.1, 0.1])
+            return vectors
+
+        mock_ep.get_embeddings = fake_get_embeddings
+        mock_kb.get_ep = AsyncMock(return_value=mock_ep)
+
+        # 1. 记忆向量偏向星空探索 [1.0, 0.0]，应匹配到第2句台词
+        quote_star = await mgr._select_best_quote(
+            char, target_vec=[1.0, 0.0], kb=mock_kb
+        )
+        self.assertEqual(quote_star, "第二句台词：向往探索浩瀚星空与宇宙真理")
+
+        # 2. 记忆向量偏向战斗 [0.0, 1.0]，应匹配到第3句台词
+        quote_battle = await mgr._select_best_quote(
+            char, target_vec=[0.0, 1.0], kb=mock_kb
+        )
+        self.assertEqual(quote_battle, "第三句台词：战斗到底永不退缩")
+
+        # 3. 异常或无向量时，降级从候选台词库中随机选取
+        quote_fallback = await mgr._select_best_quote(char, target_vec=None, kb=None)
+        self.assertIn(quote_fallback, char.quotes)
+
+        # 4. quotes 为空时，回退 tagline
+        char_no_quotes = self.CharacterProfile(
+            id="empty_char",
+            name="无台词角色",
+            tagline="保底座右铭",
+            quotes=[],
+            anchors=["锚点"],
+        )
+        quote_empty = await mgr._select_best_quote(char_no_quotes)
+        self.assertEqual(quote_empty, "保底座右铭")
 
 
 if __name__ == "__main__":
